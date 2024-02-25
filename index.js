@@ -2,7 +2,7 @@ const fs = require("fs/promises");
 const express = require("express");
 const cors = require("cors");
 const path = require("path");
-const { v4: uuidv4 } = require("uuid");
+const cryptoJs = require('crypto-js');
 const { MongoClient } = require("mongodb");
 
 const app = express();
@@ -25,7 +25,6 @@ const licensesCollection = db.collection("licenses");
 
 app.get("/validate-license", async (req, res) => {
   const licenseToValidate = req.query.key;
-  const licensesPath = path.join(__dirname, "licenses.json");
 
   try {
     const licenseObj = await licensesCollection.findOne({
@@ -34,9 +33,11 @@ app.get("/validate-license", async (req, res) => {
 
     if (licenseObj) {
       if (licenseObj.validationNumber < 3) {
-        const validationString = uuidv4();
+        const salt = cryptoJs.lib.WordArray.random(128/8).toString();
+        const validationString = cryptoJs.HmacSHA256(licenseToValidate, salt).toString();
         licenseObj.validationNumber += 1;
         licenseObj.validationStrings.push(validationString);
+        licenseObj.saltStrings.push(salt);
         // Update the license document in MongoDB
         await licensesCollection.updateOne(
           { licenseId: licenseToValidate },
@@ -44,6 +45,7 @@ app.get("/validate-license", async (req, res) => {
             $set: {
               validationNumber: licenseObj.validationNumber,
               validationStrings: licenseObj.validationStrings,
+              saltStrings: licenseObj.saltStrings,
             },
           }
         );
