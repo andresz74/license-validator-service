@@ -2,7 +2,7 @@ const fs = require("fs/promises");
 const express = require("express");
 const cors = require("cors");
 const path = require("path");
-const { v4: uuidv4 } = require("uuid");
+const cryptoJs = require('crypto-js');
 const { MongoClient } = require("mongodb");
 
 const app = express();
@@ -34,11 +34,8 @@ app.get("/validate-license", async (req, res) => {
 
     if (licenseObj) {
       if (licenseObj.validationNumber < 3) {
-        const salt = crypto.randomBytes(16).toString("hex");
-        const validationString = crypto
-          .createHmac("sha256", salt)
-          .update(code)
-          .digest("hex");
+        const salt = cryptoJs.lib.WordArray.random(128/8).toString();
+        const validationString = cryptoJs.HmacSHA256(code, salt).toString();
         licenseObj.validationNumber += 1;
         licenseObj.validationStrings.push(validationString);
         licenseObj.saltStrings.push(salt);
