@@ -34,9 +34,14 @@ app.get("/validate-license", async (req, res) => {
 
     if (licenseObj) {
       if (licenseObj.validationNumber < 3) {
-        const validationString = uuidv4();
+        const salt = crypto.randomBytes(16).toString("hex");
+        const validationString = crypto
+          .createHmac("sha256", salt)
+          .update(code)
+          .digest("hex");
         licenseObj.validationNumber += 1;
         licenseObj.validationStrings.push(validationString);
+        licenseObj.saltStrings.push(salt);
         // Update the license document in MongoDB
         await licensesCollection.updateOne(
           { licenseId: licenseToValidate },
@@ -44,6 +49,7 @@ app.get("/validate-license", async (req, res) => {
             $set: {
               validationNumber: licenseObj.validationNumber,
               validationStrings: licenseObj.validationStrings,
+              saltStrings: licenseObj.saltStrings,
             },
           }
         );
