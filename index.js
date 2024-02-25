@@ -25,7 +25,6 @@ const licensesCollection = db.collection("licenses");
 
 app.get("/validate-license", async (req, res) => {
   const licenseToValidate = req.query.key;
-  const licensesPath = path.join(__dirname, "licenses.json");
 
   try {
     const licenseObj = await licensesCollection.findOne({
@@ -35,7 +34,7 @@ app.get("/validate-license", async (req, res) => {
     if (licenseObj) {
       if (licenseObj.validationNumber < 3) {
         const salt = cryptoJs.lib.WordArray.random(128/8).toString();
-        const validationString = cryptoJs.HmacSHA256(code, salt).toString();
+        const validationString = cryptoJs.HmacSHA256(licenseToValidate, salt).toString();
         licenseObj.validationNumber += 1;
         licenseObj.validationStrings.push(validationString);
         licenseObj.saltStrings.push(salt);
