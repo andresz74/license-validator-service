@@ -17,16 +17,28 @@ app.use(express.json());
 const url = process.env.MONGODB_URI;
 const dbName = "licenseDatabase";
 const client = new MongoClient(url);
-// Connect to MongoDB
-client.connect();
+let licensesCollection;
+let mongoConnected = false;
 
-const db = client.db(dbName);
-const licensesCollection = db.collection("licenses");
+if (!url) {
+  console.error("Missing required environment variable MONGODB_URI.");
+  process.exit(1);
+}
+
+app.get("/health", (req, res) => {
+  const statusCode = mongoConnected ? 200 : 503;
+  res.status(statusCode).json({ status: "ok", mongoConnected });
+});
 
 app.get("/validate-license", async (req, res) => {
   const licenseToValidate = req.query.key;
 
   try {
+    if (!licensesCollection) {
+      res.status(503).json({ message: "Database not ready" });
+      return;
+    }
+
     const licenseObj = await licensesCollection.findOne({
       licenseId: licenseToValidate,
     });
@@ -66,6 +78,19 @@ app.get("/validate-license", async (req, res) => {
   }
 });
 
-app.listen(port, () => {
-  console.log(`Listening on port ${port}`);
-});
+const startServer = async () => {
+  try {
+    await client.connect();
+    mongoConnected = true;
+    const db = client.db(dbName);
+    licensesCollection = db.collection("licenses");
+    app.listen(port, () => {
+      console.log(`Listening on port ${port}`);
+    });
+  } catch (error) {
+    console.error("Failed to connect to MongoDB:", error);
+    process.exit(1);
+  }
+};
+
+startServer();

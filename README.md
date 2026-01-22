@@ -19,6 +19,7 @@ License Validator is a simple Node.js application built with Express.js. It prov
 
 - Node.js
 - npm (Node Package Manager)
+- MongoDB connection string available as `MONGODB_URI`
 
 ### Installation
 
@@ -33,11 +34,10 @@ License Validator is a simple Node.js application built with Express.js. It prov
     npm install
     ```
 
-3. **Set Up License Keys**
-    - Create a `licenses.json` file in the root directory.
-    - Add an array of valid license keys. Example:
-        ```json
-        ["key1", "key2", "key3"]
+3. **Set Up Environment Variables**
+    - Define the MongoDB connection string:
+        ```bash
+        export MONGODB_URI="mongodb+srv://user:pass@cluster.example.mongodb.net"
         ```
 
 ### Running the Application
@@ -78,6 +78,26 @@ License Validator is a simple Node.js application built with Express.js. It prov
 
   - **Code:** 401 UNAUTHORIZED <br />
     **Content:** `KO`
+
+### Health Endpoint
+
+- **URL**
+  
+  `/health`
+
+- **Method:**
+  
+  `GET`
+
+- **Success Response:**
+
+  - **Code:** 200 <br />
+    **Content:** `{"status":"ok","mongoConnected":true}`
+
+- **Error Response:**
+
+  - **Code:** 503 SERVICE UNAVAILABLE <br />
+    **Content:** `{"status":"ok","mongoConnected":false}`
 
 ## Contributing
 
