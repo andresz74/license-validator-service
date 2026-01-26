@@ -72,12 +72,18 @@ License Validator is a simple Node.js application built with Express.js. It prov
 - **Success Response:**
 
   - **Code:** 200 <br />
-    **Content:** `OK`
+    **Content:** `{"message":"OK","validationString":"<hash>"}`
  
 - **Error Response:**
 
-  - **Code:** 401 UNAUTHORIZED <br />
-    **Content:** `KO`
+  - **Code:** 403 UNAUTHORIZED <br />
+    **Content:** `{"message":"Invalid license key","code":"LICENSE_NOT_FOUND"}`
+
+  - **Code:** 429 TOO MANY REQUESTS <br />
+    **Content:** `{"message":"Validation limit reached","code":"VALIDATION_LIMIT_REACHED"}`
+
+  - **Code:** 503 SERVICE UNAVAILABLE <br />
+    **Content:** `{"message":"Database not ready","code":"DATABASE_NOT_READY"}`
 
 ### Health Endpoint
 
@@ -98,6 +104,10 @@ License Validator is a simple Node.js application built with Express.js. It prov
 
   - **Code:** 503 SERVICE UNAVAILABLE <br />
     **Content:** `{"status":"ok","mongoConnected":false}`
+
+## Rate Limiting
+
+Requests to `/validate-license` are rate-limited (default: 100 requests per 15 minutes per IP).
 
 ## Contributing
 
