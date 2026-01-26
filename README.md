@@ -19,6 +19,7 @@ License Validator is a simple Node.js application built with Express.js. It prov
 
 - Node.js
 - npm (Node Package Manager)
+- MongoDB connection string available as `MONGODB_URI`
 
 ### Installation
 
@@ -33,11 +34,10 @@ License Validator is a simple Node.js application built with Express.js. It prov
     npm install
     ```
 
-3. **Set Up License Keys**
-    - Create a `licenses.json` file in the root directory.
-    - Add an array of valid license keys. Example:
-        ```json
-        ["key1", "key2", "key3"]
+3. **Set Up Environment Variables**
+    - Define the MongoDB connection string:
+        ```bash
+        export MONGODB_URI="mongodb+srv://user:pass@cluster.example.mongodb.net"
         ```
 
 ### Running the Application
@@ -72,12 +72,42 @@ License Validator is a simple Node.js application built with Express.js. It prov
 - **Success Response:**
 
   - **Code:** 200 <br />
-    **Content:** `OK`
+    **Content:** `{"message":"OK","validationString":"<hash>"}`
  
 - **Error Response:**
 
-  - **Code:** 401 UNAUTHORIZED <br />
-    **Content:** `KO`
+  - **Code:** 403 UNAUTHORIZED <br />
+    **Content:** `{"message":"Invalid license key","code":"LICENSE_NOT_FOUND"}`
+
+  - **Code:** 429 TOO MANY REQUESTS <br />
+    **Content:** `{"message":"Validation limit reached","code":"VALIDATION_LIMIT_REACHED"}`
+
+  - **Code:** 503 SERVICE UNAVAILABLE <br />
+    **Content:** `{"message":"Database not ready","code":"DATABASE_NOT_READY"}`
+
+### Health Endpoint
+
+- **URL**
+  
+  `/health`
+
+- **Method:**
+  
+  `GET`
+
+- **Success Response:**
+
+  - **Code:** 200 <br />
+    **Content:** `{"status":"ok","mongoConnected":true}`
+
+- **Error Response:**
+
+  - **Code:** 503 SERVICE UNAVAILABLE <br />
+    **Content:** `{"status":"ok","mongoConnected":false}`
+
+## Rate Limiting
+
+Requests to `/validate-license` are rate-limited (default: 100 requests per 15 minutes per IP).
 
 ## Contributing
 
