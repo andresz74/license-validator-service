@@ -2,35 +2,40 @@
 
 ## Project Structure & Module Organization
 
-This is a small Node.js/Express license validation API. The main application lives in `index.js`, which exports `createApp` for tests and starts the server when run directly. Tests are in `__tests__/app.test.js` and use Jest with Supertest. `vercel.json` contains Vercel deployment routing and headers. `licenses.json` is sample legacy license data; runtime validation now depends on the MongoDB `licenseDatabase.licenses` collection. Keep new API behavior close to `index.js` unless the service grows enough to justify splitting routes or data access.
+This is a small Node.js/Express license validation API. The main application lives in `index.js`, exports an Express app for serverless use, and exposes `createApp` for tests. Tests are in `__tests__/app.test.js` and use Jest with Supertest. `vercel.json` contains Vercel routing only; CORS is handled in the app. `licenses.json` is fake sample data and is not read at runtime.
 
 ## Build, Test, and Development Commands
 
-- `npm install`: install runtime and test dependencies from `package-lock.json`.
+- `npm install`: install dependencies from `package-lock.json`.
 - `npm start`: run `node index.js` locally on `PORT` or `3000`.
-- `npm test`: run the Jest test suite.
+- `npm test`: run the Jest/Supertest suite.
 
-Local startup requires `MONGODB_URI`:
+Local startup requires `MONGODB_URI` and `HMAC_SECRET`:
 
 ```bash
-export MONGODB_URI="mongodb+srv://user:pass@cluster.example.mongodb.net"
+export MONGODB_URI="mongodb+srv://user:pass@cluster.example.net"
+export HMAC_SECRET="replace-with-a-long-random-secret"
 npm start
 ```
 
-Use `/health` to verify MongoDB readiness and `/validate-license?key=<licenseId>` to exercise validation.
+## API And Runtime Notes
+
+Use `POST /validate-license` with JSON body `{ "key": "..." }` for new clients. `GET /validate-license?key=...` is deprecated but kept for backward compatibility. `GET /health` reports MongoDB readiness.
+
+License validation must stay atomic: enforce the validation limit in MongoDB with `findOneAndUpdate`, `$inc`, and `$push`. Do not reintroduce read-then-write validation count logic.
 
 ## Coding Style & Naming Conventions
 
-Use CommonJS modules (`require`, `module.exports`) and 2-space indentation, matching the existing files. Prefer `const` by default and `let` only for mutable state. Keep response bodies structured with stable `message` and `code` fields for errors. Name tests with behavior-focused descriptions, for example `returns structured error when database not ready`. There is no configured formatter or linter, so keep changes consistent with the surrounding code.
+Use CommonJS modules and 2-space indentation. Keep response bodies structured with stable `message` and `code` fields for errors. Keep this service compact unless a change clearly justifies new modules.
 
 ## Testing Guidelines
 
-Tests use Jest and Supertest. Add or update tests in `__tests__/app.test.js` when changing routes, response codes, MongoDB readiness behavior, rate limiting, or license update logic. Inject dependencies through `createApp` instead of connecting to a real database in tests. Run `npm test` before opening a pull request.
+Route tests should use `createApp` with injected fake collections/readiness behavior. Do not require real MongoDB for Jest tests. Add or update tests when changing routes, response codes, CORS, rate limiting, MongoDB update behavior, or environment handling. Run `npm test` before finishing.
 
 ## Commit & Pull Request Guidelines
 
-Recent history uses short imperative messages and occasional Conventional Commit prefixes, such as `feat: create license-validator service` and `Add MongoDB readiness checks and health endpoint (#2)`. Keep commits focused and describe user-visible behavior. Pull requests should include a concise summary, test results, any environment/configuration changes, and linked issues when applicable. Include request/response examples when API behavior changes.
+Keep commits focused and imperative, such as `Add POST license validation`. Pull requests should include a concise summary, test results, and any environment/deployment notes. Include request/response examples when API behavior changes.
 
 ## Security & Configuration Tips
 
-Do not commit real MongoDB credentials or production license data. Store `MONGODB_URI` in the local shell or deployment environment. Be careful when changing CORS, rate-limit settings, validation counters, or hashing behavior because those affect API exposure and license enforcement.
+Do not commit secrets, real MongoDB credentials, or production license data. Required runtime env vars are `MONGODB_URI` and `HMAC_SECRET`; optional HTTP/deployment vars include `ALLOWED_ORIGINS`, `RATE_LIMIT_WINDOW_MS`, `RATE_LIMIT_MAX`, `TRUST_PROXY`, `PORT`, and `NODE_ENV`. Restrict browser origins in production and treat in-memory rate limiting as best-effort in serverless environments.
