@@ -1,6 +1,6 @@
 const express = require("express");
 const cors = require("cors");
-const cryptoJs = require("crypto-js");
+const crypto = require("crypto");
 const { MongoClient } = require("mongodb");
 const rateLimit = require("express-rate-limit");
 
@@ -64,10 +64,113 @@ const getFindOneAndUpdateDocument = (result) => {
   return result;
 };
 
+const generateSalt = () => crypto.randomBytes(16).toString("hex");
+
+const generateValidationString = (licenseKey, salt, hmacSecret) =>
+  crypto
+    .createHmac("sha256", hmacSecret)
+    .update(`${licenseKey}:${salt}`)
+    .digest("hex");
+
+const validateLicenseKey = async ({ key, collection, hmacSecret }) => {
+  const { value: licenseToValidate, error: keyError } = getValidLicenseKey(key);
+
+  if (keyError) {
+    return { status: 400, body: keyError };
+  }
+
+  if (!collection) {
+    return {
+      status: 503,
+      body: {
+        message: "Database not ready",
+        code: "DATABASE_NOT_READY",
+      },
+    };
+  }
+
+  if (!hmacSecret) {
+    return {
+      status: 500,
+      body: {
+        message: "Internal Server Error",
+        code: "SERVER_CONFIGURATION_ERROR",
+      },
+    };
+  }
+
+  const salt = generateSalt();
+  const validationString = generateValidationString(
+    licenseToValidate,
+    salt,
+    hmacSecret
+  );
+
+  const updateResult = await collection.findOneAndUpdate(
+    {
+      licenseId: licenseToValidate,
+      validationNumber: { $lt: DEFAULT_VALIDATION_LIMIT },
+    },
+    {
+      $inc: { validationNumber: 1 },
+      $push: {
+        validationStrings: validationString,
+        saltStrings: salt,
+      },
+    },
+    { returnDocument: "after" }
+  );
+
+  const updatedLicense = getFindOneAndUpdateDocument(updateResult);
+
+  if (!updatedLicense) {
+    const existingLicense = await collection.findOne({
+      licenseId: licenseToValidate,
+    });
+
+    if (!existingLicense) {
+      return {
+        status: 403,
+        body: {
+          message: "Invalid license key",
+          code: "LICENSE_NOT_FOUND",
+        },
+      };
+    }
+
+    if (existingLicense.validationNumber >= DEFAULT_VALIDATION_LIMIT) {
+      return {
+        status: 429,
+        body: {
+          message: "Validation limit reached",
+          code: "VALIDATION_LIMIT_REACHED",
+        },
+      };
+    }
+
+    return {
+      status: 500,
+      body: {
+        message: "Internal Server Error",
+        code: "LICENSE_UPDATE_FAILED",
+      },
+    };
+  }
+
+  return {
+    status: 200,
+    body: {
+      message: "OK",
+      validationString: validationString,
+    },
+  };
+};
+
 const createApp = ({
   getLicensesCollection = () => licensesCollection,
   getMongoConnected = () => mongoConnected,
   rateLimiter = defaultRateLimiter,
+  hmacSecret = process.env.HMAC_SECRET,
 } = {}) => {
   const app = express();
 
@@ -84,81 +187,14 @@ const createApp = ({
 
   app.use("/validate-license", rateLimiter);
 
-  app.get("/validate-license", async (req, res) => {
-    const { value: licenseToValidate, error: keyError } = getValidLicenseKey(
-      req.query.key
-    );
-
-    if (keyError) {
-      res.status(400).json(keyError);
-      return;
-    }
-
+  const handleValidateLicense = async (key, res) => {
     try {
-      const collection = getLicensesCollection();
-      if (!collection) {
-        res.status(503).json({
-          message: "Database not ready",
-          code: "DATABASE_NOT_READY",
-        });
-        return;
-      }
-
-      const salt = cryptoJs.lib.WordArray.random(128 / 8).toString();
-      const validationString = cryptoJs
-        .HmacSHA256(licenseToValidate, salt)
-        .toString();
-
-      const updateResult = await collection.findOneAndUpdate(
-        {
-          licenseId: licenseToValidate,
-          validationNumber: { $lt: DEFAULT_VALIDATION_LIMIT },
-        },
-        {
-          $inc: { validationNumber: 1 },
-          $push: {
-            validationStrings: validationString,
-            saltStrings: salt,
-          },
-        },
-        { returnDocument: "after" }
-      );
-
-      const updatedLicense = getFindOneAndUpdateDocument(updateResult);
-
-      if (!updatedLicense) {
-        const existingLicense = await collection.findOne({
-          licenseId: licenseToValidate,
-        });
-
-        if (!existingLicense) {
-          res.status(403).json({
-            message: "Invalid license key",
-            code: "LICENSE_NOT_FOUND",
-          });
-          return;
-        }
-
-        if (existingLicense.validationNumber >= DEFAULT_VALIDATION_LIMIT) {
-          res.status(429).json({
-            message: "Validation limit reached",
-            code: "VALIDATION_LIMIT_REACHED",
-          });
-          return;
-        }
-
-        res.status(500).json({
-          message: "Internal Server Error",
-          code: "LICENSE_UPDATE_FAILED",
-        });
-        return;
-      }
-
-      // Return validationString value in the response body only after update.
-      res.status(200).json({
-        message: "OK",
-        validationString: validationString,
+      const result = await validateLicenseKey({
+        key,
+        collection: getLicensesCollection(),
+        hmacSecret,
       });
+      res.status(result.status).json(result.body);
     } catch (error) {
       console.error("Failed to read or update license in MongoDB:", error);
       res.status(500).json({
@@ -166,6 +202,19 @@ const createApp = ({
         code: "INTERNAL_SERVER_ERROR",
       });
     }
+  };
+
+  app.get("/validate-license", async (req, res) => {
+    res.set("Deprecation", "true");
+    res.set(
+      "Warning",
+      '299 - "GET /validate-license is deprecated; use POST /validate-license"'
+    );
+    await handleValidateLicense(req.query.key, res);
+  });
+
+  app.post("/validate-license", async (req, res) => {
+    await handleValidateLicense(req.body && req.body.key, res);
   });
 
   return app;
@@ -173,9 +222,15 @@ const createApp = ({
 
 const startServer = async () => {
   const url = process.env.MONGODB_URI;
+  const hmacSecret = process.env.HMAC_SECRET;
 
   if (!url) {
     console.error("Missing required environment variable MONGODB_URI.");
+    process.exit(1);
+  }
+
+  if (!hmacSecret) {
+    console.error("Missing required environment variable HMAC_SECRET.");
     process.exit(1);
   }
 
@@ -203,7 +258,7 @@ const startServer = async () => {
       }
     }
 
-    const app = createApp();
+    const app = createApp({ hmacSecret });
     app.listen(port, () => {
       console.log(`Listening on port ${port}`);
     });
