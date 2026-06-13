@@ -11,6 +11,7 @@ let licensesCollection;
 let mongoConnected = false;
 const maxConnectAttempts = 5;
 const connectRetryDelayMs = 1000;
+const DEFAULT_VALIDATION_LIMIT = 3;
 
 const defaultRateLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -49,6 +50,18 @@ const getValidLicenseKey = (key) => {
   }
 
   return { value: trimmedKey };
+};
+
+const getFindOneAndUpdateDocument = (result) => {
+  if (!result) {
+    return null;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(result, "value")) {
+    return result.value;
+  }
+
+  return result;
 };
 
 const createApp = ({
@@ -91,46 +104,57 @@ const createApp = ({
         return;
       }
 
-      const licenseObj = await collection.findOne({
-        licenseId: licenseToValidate,
-      });
-
-      if (!licenseObj) {
-        res.status(403).json({
-          message: "Invalid license key",
-          code: "LICENSE_NOT_FOUND",
-        });
-        return;
-      }
-
-      if (licenseObj.validationNumber >= 3) {
-        res.status(429).json({
-          message: "Validation limit reached",
-          code: "VALIDATION_LIMIT_REACHED",
-        });
-        return;
-      }
-
       const salt = cryptoJs.lib.WordArray.random(128 / 8).toString();
       const validationString = cryptoJs
         .HmacSHA256(licenseToValidate, salt)
         .toString();
-      licenseObj.validationNumber += 1;
-      licenseObj.validationStrings.push(validationString);
-      licenseObj.saltStrings.push(salt);
-      // Update the license document in MongoDB
-      await collection.updateOne(
-        { licenseId: licenseToValidate },
+
+      const updateResult = await collection.findOneAndUpdate(
         {
-          $set: {
-            validationNumber: licenseObj.validationNumber,
-            validationStrings: licenseObj.validationStrings,
-            saltStrings: licenseObj.saltStrings,
+          licenseId: licenseToValidate,
+          validationNumber: { $lt: DEFAULT_VALIDATION_LIMIT },
+        },
+        {
+          $inc: { validationNumber: 1 },
+          $push: {
+            validationStrings: validationString,
+            saltStrings: salt,
           },
-        }
+        },
+        { returnDocument: "after" }
       );
 
-      // Return validationString value in the response body
+      const updatedLicense = getFindOneAndUpdateDocument(updateResult);
+
+      if (!updatedLicense) {
+        const existingLicense = await collection.findOne({
+          licenseId: licenseToValidate,
+        });
+
+        if (!existingLicense) {
+          res.status(403).json({
+            message: "Invalid license key",
+            code: "LICENSE_NOT_FOUND",
+          });
+          return;
+        }
+
+        if (existingLicense.validationNumber >= DEFAULT_VALIDATION_LIMIT) {
+          res.status(429).json({
+            message: "Validation limit reached",
+            code: "VALIDATION_LIMIT_REACHED",
+          });
+          return;
+        }
+
+        res.status(500).json({
+          message: "Internal Server Error",
+          code: "LICENSE_UPDATE_FAILED",
+        });
+        return;
+      }
+
+      // Return validationString value in the response body only after update.
       res.status(200).json({
         message: "OK",
         validationString: validationString,

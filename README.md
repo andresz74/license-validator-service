@@ -51,6 +51,25 @@ License Validator is a simple Node.js application built with Express.js. It prov
 2. **Access the Endpoint**
     - Validate a license key by navigating to `http://localhost:3000/validate-license?key=your_license_key`.
 
+## MongoDB Collection
+
+The service expects licenses in the `licenseDatabase.licenses` collection. Create a unique index on `licenseId` so each key maps to exactly one document and validation behavior is deterministic:
+
+```js
+db.licenses.createIndex({ licenseId: 1 }, { unique: true })
+```
+
+Expected document shape:
+
+```js
+{
+  licenseId: "example-license-key",
+  validationNumber: 0,
+  validationStrings: [],
+  saltStrings: []
+}
+```
+
 ## API Reference
 
 ### Validate License Endpoint
