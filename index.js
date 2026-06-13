@@ -12,12 +12,52 @@ let mongoConnected = false;
 const maxConnectAttempts = 5;
 const connectRetryDelayMs = 1000;
 const DEFAULT_VALIDATION_LIMIT = 3;
+const DEFAULT_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
+const DEFAULT_RATE_LIMIT_MAX = 100;
 
-const defaultRateLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  limit: 100,
-  standardHeaders: true,
-  legacyHeaders: false,
+const parseAllowedOrigins = (value) => {
+  if (!value) {
+    return [];
+  }
+
+  return value
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+};
+
+const getPositiveInteger = (value, fallback) => {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+};
+
+const getBoolean = (value) => value === true || value === "true";
+
+const createValidationRateLimiter = ({
+  windowMs = getPositiveInteger(
+    process.env.RATE_LIMIT_WINDOW_MS,
+    DEFAULT_RATE_LIMIT_WINDOW_MS
+  ),
+  limit = getPositiveInteger(process.env.RATE_LIMIT_MAX, DEFAULT_RATE_LIMIT_MAX),
+} = {}) =>
+  rateLimit({
+    windowMs,
+    limit,
+    standardHeaders: true,
+    legacyHeaders: false,
+  });
+
+const createCorsOptions = (
+  allowedOrigins = parseAllowedOrigins(process.env.ALLOWED_ORIGINS)
+) => ({
+  origin: (origin, callback) => {
+    if (!origin) {
+      callback(null, false);
+      return;
+    }
+
+    callback(null, allowedOrigins.includes(origin) ? origin : false);
+  },
 });
 
 const getValidLicenseKey = (key) => {
@@ -166,15 +206,50 @@ const validateLicenseKey = async ({ key, collection, hmacSecret }) => {
   };
 };
 
+const createMongoCollectionProvider = (url) => {
+  let clientPromise;
+  let collection;
+
+  return async () => {
+    if (collection) {
+      return collection;
+    }
+
+    if (!url) {
+      return null;
+    }
+
+    if (!clientPromise) {
+      const client = new MongoClient(url);
+      clientPromise = client.connect().then((connectedClient) => {
+        mongoConnected = true;
+        return connectedClient;
+      });
+    }
+
+    const client = await clientPromise;
+    const db = client.db(dbName);
+    collection = db.collection("licenses");
+    return collection;
+  };
+};
+
 const createApp = ({
   getLicensesCollection = () => licensesCollection,
   getMongoConnected = () => mongoConnected,
-  rateLimiter = defaultRateLimiter,
+  rateLimiter,
+  rateLimitOptions,
   hmacSecret = process.env.HMAC_SECRET,
+  allowedOrigins = parseAllowedOrigins(process.env.ALLOWED_ORIGINS),
+  trustProxy = getBoolean(process.env.TRUST_PROXY),
 } = {}) => {
   const app = express();
 
-  app.use(cors());
+  if (trustProxy) {
+    app.set("trust proxy", 1);
+  }
+
+  app.use(cors(createCorsOptions(allowedOrigins)));
 
   // Enable JSON support
   app.use(express.json());
@@ -185,13 +260,16 @@ const createApp = ({
     res.status(statusCode).json({ status: "ok", mongoConnected: connected });
   });
 
-  app.use("/validate-license", rateLimiter);
+  app.use(
+    "/validate-license",
+    rateLimiter || createValidationRateLimiter(rateLimitOptions)
+  );
 
   const handleValidateLicense = async (key, res) => {
     try {
       const result = await validateLicenseKey({
         key,
-        collection: getLicensesCollection(),
+        collection: await getLicensesCollection(),
         hmacSecret,
       });
       res.status(result.status).json(result.body);
@@ -272,13 +350,17 @@ if (require.main === module) {
   startServer();
 }
 
-module.exports = {
-  createApp,
-  startServer,
-  setLicensesCollection: (collection) => {
-    licensesCollection = collection;
-  },
-  setMongoConnected: (connected) => {
-    mongoConnected = connected;
-  },
+const serverlessApp = createApp({
+  getLicensesCollection: createMongoCollectionProvider(process.env.MONGODB_URI),
+  hmacSecret: process.env.HMAC_SECRET,
+});
+
+module.exports = serverlessApp;
+module.exports.createApp = createApp;
+module.exports.startServer = startServer;
+module.exports.setLicensesCollection = (collection) => {
+  licensesCollection = collection;
+};
+module.exports.setMongoConnected = (connected) => {
+  mongoConnected = connected;
 };

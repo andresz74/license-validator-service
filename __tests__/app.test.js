@@ -1,6 +1,8 @@
 const request = require("supertest");
 const crypto = require("crypto");
-const { createApp } = require("../index");
+const exportedApp = require("../index");
+
+const { createApp } = exportedApp;
 
 const noRateLimit = (req, res, next) => next();
 const TEST_HMAC_SECRET = "test-hmac-secret";
@@ -11,6 +13,11 @@ const createTestApp = (options = {}) =>
   });
 
 describe("license validator service", () => {
+  test("exports an Express app for serverless usage while keeping createApp importable", () => {
+    expect(typeof exportedApp).toBe("function");
+    expect(typeof createApp).toBe("function");
+  });
+
   test("health reports MongoDB readiness", async () => {
     const app = createTestApp({
       getMongoConnected: () => false,
@@ -21,6 +28,73 @@ describe("license validator service", () => {
 
     expect(response.status).toBe(503);
     expect(response.body).toEqual({ status: "ok", mongoConnected: false });
+  });
+
+  test("health is not rate limited", async () => {
+    const app = createTestApp({
+      getMongoConnected: () => true,
+      rateLimitOptions: { windowMs: 60 * 1000, limit: 1 },
+    });
+
+    const firstResponse = await request(app).get("/health");
+    const secondResponse = await request(app).get("/health");
+
+    expect(firstResponse.status).toBe(200);
+    expect(secondResponse.status).toBe(200);
+  });
+
+  test("allows configured CORS origins", async () => {
+    const app = createTestApp({
+      allowedOrigins: ["https://app.example.com"],
+      getMongoConnected: () => true,
+      rateLimiter: noRateLimit,
+    });
+
+    const response = await request(app)
+      .get("/health")
+      .set("Origin", "https://app.example.com");
+
+    expect(response.status).toBe(200);
+    expect(response.headers["access-control-allow-origin"]).toBe(
+      "https://app.example.com"
+    );
+  });
+
+  test("does not emit permissive CORS headers for disallowed origins", async () => {
+    const app = createTestApp({
+      allowedOrigins: ["https://app.example.com"],
+      getMongoConnected: () => true,
+      rateLimiter: noRateLimit,
+    });
+
+    const response = await request(app)
+      .get("/health")
+      .set("Origin", "https://evil.example.com");
+
+    expect(response.status).toBe(200);
+    expect(response.headers["access-control-allow-origin"]).toBeUndefined();
+  });
+
+  test("requests without Origin still work", async () => {
+    const app = createTestApp({
+      allowedOrigins: ["https://app.example.com"],
+      getMongoConnected: () => true,
+      rateLimiter: noRateLimit,
+    });
+
+    const response = await request(app).get("/health");
+
+    expect(response.status).toBe(200);
+    expect(response.headers["access-control-allow-origin"]).toBeUndefined();
+  });
+
+  test("trust proxy can be enabled through app config", () => {
+    const app = createTestApp({
+      trustProxy: true,
+      rateLimiter: noRateLimit,
+    });
+
+    expect(app.get("trust proxy")).toBe(1);
   });
 
   test("returns structured error when license key is missing", async () => {
@@ -216,6 +290,68 @@ describe("license validator service", () => {
       { returnDocument: "after" }
     );
     expect(collection.findOne).not.toHaveBeenCalled();
+  });
+
+  test("POST /validate-license is rate limited with configurable limits", async () => {
+    const license = {
+      licenseId: "abc123",
+      validationNumber: 1,
+      validationStrings: [],
+      saltStrings: [],
+    };
+
+    const collection = {
+      findOne: jest.fn(),
+      findOneAndUpdate: jest.fn().mockResolvedValue(license),
+    };
+
+    const app = createTestApp({
+      getLicensesCollection: () => collection,
+      getMongoConnected: () => true,
+      rateLimitOptions: { windowMs: 60 * 1000, limit: 1 },
+    });
+
+    const firstResponse = await request(app)
+      .post("/validate-license")
+      .send({ key: "abc123" });
+    const secondResponse = await request(app)
+      .post("/validate-license")
+      .send({ key: "abc123" });
+
+    expect(firstResponse.status).toBe(200);
+    expect(secondResponse.status).toBe(429);
+    expect(collection.findOneAndUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  test("GET /validate-license is rate limited with configurable limits", async () => {
+    const license = {
+      licenseId: "abc123",
+      validationNumber: 1,
+      validationStrings: [],
+      saltStrings: [],
+    };
+
+    const collection = {
+      findOne: jest.fn(),
+      findOneAndUpdate: jest.fn().mockResolvedValue(license),
+    };
+
+    const app = createTestApp({
+      getLicensesCollection: () => collection,
+      getMongoConnected: () => true,
+      rateLimitOptions: { windowMs: 60 * 1000, limit: 1 },
+    });
+
+    const firstResponse = await request(app)
+      .get("/validate-license")
+      .query({ key: "abc123" });
+    const secondResponse = await request(app)
+      .get("/validate-license")
+      .query({ key: "abc123" });
+
+    expect(firstResponse.status).toBe(200);
+    expect(secondResponse.status).toBe(429);
+    expect(collection.findOneAndUpdate).toHaveBeenCalledTimes(1);
   });
 
   test.each([
