@@ -1,61 +1,74 @@
-# license-validator-service
----
+# License Validator Service
 
-# License Validator
+Node.js/Express API for validating software license keys stored in MongoDB. Runtime validation uses the `licenseDatabase.licenses` collection; `licenses.json` is sample data only and is not read by the application.
 
-## About
+## Endpoints
 
-License Validator is a simple Node.js application built with Express.js. It provides an API endpoint to validate license keys against a predefined list of valid licenses. This project is useful for software that requires license key validation.
+### `GET /health`
 
-## Features
+Reports MongoDB readiness.
 
-- Validate license keys via an API endpoint.
-- Easy integration with existing systems.
-- Simple and straightforward setup.
+Success:
 
-## Getting Started
+```json
+{
+  "status": "ok",
+  "mongoConnected": true
+}
+```
 
-### Prerequisites
+When MongoDB is not ready, the endpoint returns `503` with `mongoConnected: false`.
 
-- Node.js
-- npm (Node Package Manager)
-- MongoDB connection string available as `MONGODB_URI`
-- HMAC signing secret available as `HMAC_SECRET`
+### `POST /validate-license`
 
-### Installation
+Preferred endpoint for license validation. New clients should use POST so license keys are not placed in URLs, browser history, logs, proxies, analytics, CDNs, or referrers.
 
-1. **Clone the Repository**
-    ```bash
-    git clone https://github.com/andresz74/license-validator-main.git
-    cd license-validator-main
-    ```
+```bash
+curl -X POST http://localhost:3000/validate-license \
+  -H "Content-Type: application/json" \
+  -d '{"key":"example-license-key"}'
+```
 
-2. **Install Dependencies**
-    ```bash
-    npm install
-    ```
+Success:
 
-3. **Set Up Environment Variables**
-    - Define the MongoDB connection string and HMAC secret:
-        ```bash
-        export MONGODB_URI="mongodb+srv://user:pass@cluster.example.mongodb.net"
-        export HMAC_SECRET="replace-with-a-long-random-secret"
-        ```
+```json
+{
+  "message": "OK",
+  "validationString": "<hash>"
+}
+```
 
-### Running the Application
+### `GET /validate-license?key=<licenseId>`
 
-1. **Start the Server**
-    ```bash
-    npm start
-    ```
-    The server will start on `http://localhost:3000`.
+Deprecated but temporarily supported for backward compatibility. GET responses include deprecation headers. Prefer `POST /validate-license` for all new integrations.
 
-2. **Access the Endpoint**
-    - Validate a license key with `POST /validate-license`. New clients should not send license keys in URLs.
+## Error Responses
 
-## MongoDB Collection
+- `400`: missing or invalid key, for example `{"message":"License key is required","code":"MISSING_LICENSE_KEY"}` or `{"message":"Invalid license key","code":"INVALID_LICENSE_KEY"}`.
+- `403`: unknown license, `{"message":"Invalid license key","code":"LICENSE_NOT_FOUND"}`.
+- `429`: validation limit reached, `{"message":"Validation limit reached","code":"VALIDATION_LIMIT_REACHED"}`.
+- `429`: request rate limit reached, returned by `express-rate-limit`.
+- `503`: database not ready, `{"message":"Database not ready","code":"DATABASE_NOT_READY"}`.
+- `500`: unexpected validation/update failure, such as `{"message":"Internal Server Error","code":"INTERNAL_SERVER_ERROR"}` or `{"message":"Internal Server Error","code":"LICENSE_UPDATE_FAILED"}`.
 
-The service expects licenses in the `licenseDatabase.licenses` collection. Create a unique index on `licenseId` so each key maps to exactly one document and validation behavior is deterministic:
+## Environment Variables
+
+| Variable | Required | Default | Example | Controls |
+| --- | --- | --- | --- | --- |
+| `MONGODB_URI` | Yes for startup/deploy | None | `mongodb+srv://user:pass@cluster.example.net` | MongoDB connection. |
+| `HMAC_SECRET` | Yes for startup/deploy | None | `replace-with-a-long-random-secret` | Server-side HMAC key for validation strings. |
+| `PORT` | No | `3000` | `3000` | Local server port for `npm start`. |
+| `ALLOWED_ORIGINS` | No | No browser CORS origins | `https://example.com,https://app.example.com` | Comma-separated browser origins allowed by CORS. |
+| `RATE_LIMIT_WINDOW_MS` | No | `900000` | `900000` | Validation rate-limit window. |
+| `RATE_LIMIT_MAX` | No | `100` | `100` | Validation requests allowed per window per IP. |
+| `TRUST_PROXY` | No | unset/false | `true` | Enables `app.set("trust proxy", 1)` behind trusted proxies. |
+| `NODE_ENV` | No | unset | `production` | Standard Node environment label; current CORS behavior is controlled by `ALLOWED_ORIGINS`. |
+
+## MongoDB Setup
+
+The service uses database `licenseDatabase` and collection `licenses`.
+
+Create a unique index so each key maps to one document:
 
 ```js
 db.licenses.createIndex({ licenseId: 1 }, { unique: true })
@@ -72,127 +85,45 @@ Expected document shape:
 }
 ```
 
-## API Reference
+License validation increments `validationNumber` atomically with MongoDB and stores generated validation strings and salts in the arrays.
 
-### Validate License Endpoint
-
-- **URL**
-  
-  `/validate-license`
-
-- **Preferred Method:**
-
-  `POST`
-
-- **Request Body:**
-
-  ```json
-  {
-    "key": "your_license_key"
-  }
-  ```
-
-- **Deprecated Method:**
-  
-  `GET`
-  
-- **URL Params**
-
-   **Required for GET only:**
- 
-   `key=[string]`
-
-- **Deprecation Notice:**
-
-  `GET /validate-license?key=...` remains temporarily supported for backward compatibility, but it is deprecated because license keys in URLs can appear in browser history, logs, analytics, proxies, CDNs, and referrers. GET responses include a deprecation header. Use POST for new integrations.
-
-- **Success Response:**
-
-  - **Code:** 200 <br />
-    **Content:** `{"message":"OK","validationString":"<hash>"}`
- 
-- **Error Response:**
-
-  - **Code:** 403 UNAUTHORIZED <br />
-    **Content:** `{"message":"Invalid license key","code":"LICENSE_NOT_FOUND"}`
-
-  - **Code:** 429 TOO MANY REQUESTS <br />
-    **Content:** `{"message":"Validation limit reached","code":"VALIDATION_LIMIT_REACHED"}`
-
-  - **Code:** 503 SERVICE UNAVAILABLE <br />
-    **Content:** `{"message":"Database not ready","code":"DATABASE_NOT_READY"}`
-
-### Environment Variables
-
-- `MONGODB_URI`: required MongoDB connection string.
-- `HMAC_SECRET`: required server-side secret used to sign validation strings.
-- `PORT`: optional local port; defaults to `3000`.
-- `ALLOWED_ORIGINS`: optional comma-separated browser origins allowed by CORS.
-- `RATE_LIMIT_WINDOW_MS`: optional validation rate-limit window; defaults to `900000`.
-- `RATE_LIMIT_MAX`: optional validation request limit per window; defaults to `100`.
-- `TRUST_PROXY`: optional; set to `true` behind a trusted proxy or hosted platform so client IP handling works correctly.
-
-### Health Endpoint
-
-- **URL**
-  
-  `/health`
-
-- **Method:**
-  
-  `GET`
-
-- **Success Response:**
-
-  - **Code:** 200 <br />
-    **Content:** `{"status":"ok","mongoConnected":true}`
-
-- **Error Response:**
-
-  - **Code:** 503 SERVICE UNAVAILABLE <br />
-    **Content:** `{"status":"ok","mongoConnected":false}`
-
-## Rate Limiting
-
-Requests to `POST /validate-license` and deprecated `GET /validate-license` are rate-limited. Defaults are 100 requests per 15 minutes per IP. `/health` is not rate-limited.
+## Local Development
 
 ```bash
-export RATE_LIMIT_WINDOW_MS=900000
-export RATE_LIMIT_MAX=100
+npm install
+export MONGODB_URI="mongodb+srv://user:pass@cluster.example.net"
+export HMAC_SECRET="replace-with-a-long-random-secret"
+npm start
 ```
 
-The default in-memory limiter is best-effort in serverless environments because each instance can have separate memory. Use `TRUST_PROXY=true` when the app runs behind a trusted proxy so Express and the limiter can use the correct client IP.
-
-## CORS
-
-Browser CORS access is controlled with `ALLOWED_ORIGINS`. When it is unset, the API does not emit broad browser CORS headers, but non-browser requests such as server-to-server calls and `curl` still work.
+Run tests:
 
 ```bash
-export ALLOWED_ORIGINS="https://example.com,https://app.example.com"
+npm test
 ```
 
-Avoid using wildcard origins for production license validation clients. If browser access is needed, list each trusted application origin explicitly.
+There are no lint or typecheck scripts configured.
 
 ## Deployment Notes
 
-For local development, run `npm start` with `MONGODB_URI` and `HMAC_SECRET` set. On Vercel, configure `MONGODB_URI`, `HMAC_SECRET`, `ALLOWED_ORIGINS`, and `TRUST_PROXY=true` in the project environment. CORS is handled by the Express app, not by static `vercel.json` headers, so local and deployed behavior stay consistent.
+The app supports local long-running server mode with `npm start` and Vercel/serverless import through `index.js`. Do not call `app.listen()` in serverless mode; the exported Express app is used by the platform.
 
-## Contributing
+CORS is handled by the Express app. Set `ALLOWED_ORIGINS` in production instead of using wildcard static headers. Requests without an `Origin` header still work for server-to-server clients and `curl`.
 
-Contributions to the License Validator project are welcome!
+Rate limiting applies to `POST /validate-license` and deprecated `GET /validate-license`; `/health` is not rate-limited. The default in-memory limiter is best-effort in serverless environments because each instance has separate memory. Use `TRUST_PROXY=true` on trusted hosted/proxy platforms so client IP handling works correctly.
 
-1. Fork the Project
-2. Create your Feature Branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your Changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the Branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
+## Security Notes
+
+- Prefer POST; do not send license keys in URLs for new clients.
+- Keep `HMAC_SECRET` private and rotate it carefully because it signs validation strings.
+- Do not commit production MongoDB credentials, HMAC secrets, or production license data.
+- Restrict `ALLOWED_ORIGINS` to trusted browser clients in production.
+- Treat in-memory rate limiting as best-effort in serverless deployments.
+
+## Sample Data
+
+`licenses.json` contains fake sample license documents that match the expected MongoDB shape. It is not used by the runtime service.
 
 ## License
 
-Distributed under the MIT License. See `LICENSE` file for more information.
-
-## Contact
-
-Andres Zenteno - [andres@zenteno.org](mailto:andres@zenteno.org)
-
-Project Link: [https://github.com/andresz74/license-validator-main](https://github.com/andresz74/license-validator-main)
+Distributed under the MIT License. See `LICENSE` for details.
