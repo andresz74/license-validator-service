@@ -6,19 +6,11 @@ const rateLimit = require("express-rate-limit");
 
 const port = process.env.PORT || 3000;
 
-// Connection URL and Database Settings
-const url = process.env.MONGODB_URI;
 const dbName = "licenseDatabase";
-const client = new MongoClient(url);
 let licensesCollection;
 let mongoConnected = false;
 const maxConnectAttempts = 5;
 const connectRetryDelayMs = 1000;
-
-if (!url) {
-  console.error("Missing required environment variable MONGODB_URI.");
-  process.exit(1);
-}
 
 const defaultRateLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -26,6 +18,38 @@ const defaultRateLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
 });
+
+const getValidLicenseKey = (key) => {
+  if (key === undefined) {
+    return {
+      error: {
+        message: "License key is required",
+        code: "MISSING_LICENSE_KEY",
+      },
+    };
+  }
+
+  if (typeof key !== "string") {
+    return {
+      error: {
+        message: "Invalid license key",
+        code: "INVALID_LICENSE_KEY",
+      },
+    };
+  }
+
+  const trimmedKey = key.trim();
+  if (!trimmedKey) {
+    return {
+      error: {
+        message: "License key is required",
+        code: "MISSING_LICENSE_KEY",
+      },
+    };
+  }
+
+  return { value: trimmedKey };
+};
 
 const createApp = ({
   getLicensesCollection = () => licensesCollection,
@@ -48,7 +72,14 @@ const createApp = ({
   app.use("/validate-license", rateLimiter);
 
   app.get("/validate-license", async (req, res) => {
-    const licenseToValidate = req.query.key;
+    const { value: licenseToValidate, error: keyError } = getValidLicenseKey(
+      req.query.key
+    );
+
+    if (keyError) {
+      res.status(400).json(keyError);
+      return;
+    }
 
     try {
       const collection = getLicensesCollection();
@@ -105,7 +136,7 @@ const createApp = ({
         validationString: validationString,
       });
     } catch (error) {
-      console.error("Failed to read, update, or parse licenses file:", error);
+      console.error("Failed to read or update license in MongoDB:", error);
       res.status(500).json({
         message: "Internal Server Error",
         code: "INTERNAL_SERVER_ERROR",
@@ -117,6 +148,15 @@ const createApp = ({
 };
 
 const startServer = async () => {
+  const url = process.env.MONGODB_URI;
+
+  if (!url) {
+    console.error("Missing required environment variable MONGODB_URI.");
+    process.exit(1);
+  }
+
+  const client = new MongoClient(url);
+
   try {
     for (let attempt = 1; attempt <= maxConnectAttempts; attempt += 1) {
       try {
