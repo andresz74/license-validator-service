@@ -127,6 +127,10 @@ Expected document shape:
 - `MONGODB_URI`: required MongoDB connection string.
 - `HMAC_SECRET`: required server-side secret used to sign validation strings.
 - `PORT`: optional local port; defaults to `3000`.
+- `ALLOWED_ORIGINS`: optional comma-separated browser origins allowed by CORS.
+- `RATE_LIMIT_WINDOW_MS`: optional validation rate-limit window; defaults to `900000`.
+- `RATE_LIMIT_MAX`: optional validation request limit per window; defaults to `100`.
+- `TRUST_PROXY`: optional; set to `true` behind a trusted proxy or hosted platform so client IP handling works correctly.
 
 ### Health Endpoint
 
@@ -150,7 +154,28 @@ Expected document shape:
 
 ## Rate Limiting
 
-Requests to `/validate-license` are rate-limited (default: 100 requests per 15 minutes per IP).
+Requests to `POST /validate-license` and deprecated `GET /validate-license` are rate-limited. Defaults are 100 requests per 15 minutes per IP. `/health` is not rate-limited.
+
+```bash
+export RATE_LIMIT_WINDOW_MS=900000
+export RATE_LIMIT_MAX=100
+```
+
+The default in-memory limiter is best-effort in serverless environments because each instance can have separate memory. Use `TRUST_PROXY=true` when the app runs behind a trusted proxy so Express and the limiter can use the correct client IP.
+
+## CORS
+
+Browser CORS access is controlled with `ALLOWED_ORIGINS`. When it is unset, the API does not emit broad browser CORS headers, but non-browser requests such as server-to-server calls and `curl` still work.
+
+```bash
+export ALLOWED_ORIGINS="https://example.com,https://app.example.com"
+```
+
+Avoid using wildcard origins for production license validation clients. If browser access is needed, list each trusted application origin explicitly.
+
+## Deployment Notes
+
+For local development, run `npm start` with `MONGODB_URI` and `HMAC_SECRET` set. On Vercel, configure `MONGODB_URI`, `HMAC_SECRET`, `ALLOWED_ORIGINS`, and `TRUST_PROXY=true` in the project environment. CORS is handled by the Express app, not by static `vercel.json` headers, so local and deployed behavior stay consistent.
 
 ## Contributing
 
