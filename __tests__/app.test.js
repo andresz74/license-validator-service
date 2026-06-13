@@ -16,6 +16,96 @@ describe("license validator service", () => {
     expect(response.body).toEqual({ status: "ok", mongoConnected: false });
   });
 
+  test("returns structured error when license key is missing", async () => {
+    const collection = {
+      findOne: jest.fn(),
+    };
+
+    const app = createApp({
+      getLicensesCollection: () => collection,
+      getMongoConnected: () => true,
+      rateLimiter: noRateLimit,
+    });
+
+    const response = await request(app).get("/validate-license");
+
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual({
+      message: "License key is required",
+      code: "MISSING_LICENSE_KEY",
+    });
+    expect(collection.findOne).not.toHaveBeenCalled();
+  });
+
+  test("returns structured error when license key is empty", async () => {
+    const collection = {
+      findOne: jest.fn(),
+    };
+
+    const app = createApp({
+      getLicensesCollection: () => collection,
+      getMongoConnected: () => true,
+      rateLimiter: noRateLimit,
+    });
+
+    const response = await request(app)
+      .get("/validate-license")
+      .query({ key: "" });
+
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual({
+      message: "License key is required",
+      code: "MISSING_LICENSE_KEY",
+    });
+    expect(collection.findOne).not.toHaveBeenCalled();
+  });
+
+  test("returns structured error when license key is whitespace only", async () => {
+    const collection = {
+      findOne: jest.fn(),
+    };
+
+    const app = createApp({
+      getLicensesCollection: () => collection,
+      getMongoConnected: () => true,
+      rateLimiter: noRateLimit,
+    });
+
+    const response = await request(app)
+      .get("/validate-license")
+      .query({ key: "   " });
+
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual({
+      message: "License key is required",
+      code: "MISSING_LICENSE_KEY",
+    });
+    expect(collection.findOne).not.toHaveBeenCalled();
+  });
+
+  test("returns structured error when license key is not a simple string", async () => {
+    const collection = {
+      findOne: jest.fn(),
+    };
+
+    const app = createApp({
+      getLicensesCollection: () => collection,
+      getMongoConnected: () => true,
+      rateLimiter: noRateLimit,
+    });
+
+    const response = await request(app).get(
+      "/validate-license?key=abc123&key=def456"
+    );
+
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual({
+      message: "Invalid license key",
+      code: "INVALID_LICENSE_KEY",
+    });
+    expect(collection.findOne).not.toHaveBeenCalled();
+  });
+
   test("validates a license and returns a validation string", async () => {
     const license = {
       licenseId: "abc123",
