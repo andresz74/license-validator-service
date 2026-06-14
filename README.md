@@ -49,7 +49,8 @@ Deprecated but temporarily supported for backward compatibility. GET responses i
 - `429`: validation limit reached, `{"message":"Validation limit reached","code":"VALIDATION_LIMIT_REACHED"}`.
 - `429`: request rate limit reached, returned by `express-rate-limit`.
 - `503`: database not ready, `{"message":"Database not ready","code":"DATABASE_NOT_READY"}`.
-- `500`: unexpected validation/update failure, such as `{"message":"Internal Server Error","code":"INTERNAL_SERVER_ERROR"}` or `{"message":"Internal Server Error","code":"LICENSE_UPDATE_FAILED"}`.
+- `500`: malformed license document, `{"message":"License validation failed","code":"LICENSE_DOCUMENT_INVALID"}`.
+- `500`: unexpected validation/update/configuration failure, such as `{"message":"Internal Server Error","code":"INTERNAL_SERVER_ERROR"}`, `{"message":"Internal Server Error","code":"LICENSE_UPDATE_FAILED"}`, or `{"message":"Internal Server Error","code":"SERVER_CONFIGURATION_ERROR"}`.
 
 ## Environment Variables
 
