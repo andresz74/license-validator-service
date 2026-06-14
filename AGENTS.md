@@ -27,6 +27,8 @@ License validation must stay atomic: enforce the validation limit in MongoDB wit
 
 Activation logic must also stay atomic. Same-device reactivation must reuse the existing activation and must not consume another slot. New-device activation must only append an activation record when the license is active and the current activation count is below `maxActivations`. Legacy activation records may omit `status`, `maxActivations`, or `activations`; existing values must have the documented types and malformed documents should fail safely.
 
+Admin UI routes live under `/admin` and must stay protected by HTTP Basic Auth with `ADMIN_USERNAME` and `ADMIN_PASSWORD`. Do not add unauthenticated license creation endpoints. Admin-created licenses must use the activation model and must not include legacy validation fields.
+
 Generate new customer licenses locally with `npm run create-license`; the script loads `.env` from the project root if present. New license records should use the activation model (`status`, `maxActivations`, `activations`, timestamps, `source`) and should not include legacy `validationNumber`, `validationStrings`, or `saltStrings` fields. Do not add public license creation endpoints without authentication and explicit approval.
 
 ## Coding Style & Naming Conventions
@@ -43,4 +45,4 @@ Keep commits focused and imperative, such as `Add POST license validation`. Pull
 
 ## Security & Configuration Tips
 
-Do not commit secrets, real MongoDB credentials, or production license data. Required runtime env vars are `MONGODB_URI` and `HMAC_SECRET`; optional HTTP/deployment vars include `ALLOWED_ORIGINS`, `ALLOW_NULL_ORIGIN`, `RATE_LIMIT_WINDOW_MS`, `RATE_LIMIT_MAX`, `TRUST_PROXY`, `PORT`, and `NODE_ENV`. Adobe/plugin runtimes may send `Origin: null`; only enable that with `ALLOW_NULL_ORIGIN=true` when needed. Do not treat CORS as the licensing security boundary. Restrict browser origins in production and treat in-memory rate limiting as best-effort in serverless environments. Never put backend secrets in Photoshop plugin code; device IDs should be stable opaque hashes rather than sensitive raw personal data.
+Do not commit secrets, real MongoDB credentials, admin credentials, or production license data. Required runtime env vars are `MONGODB_URI` and `HMAC_SECRET`; admin routes require `ADMIN_USERNAME` and `ADMIN_PASSWORD`; optional HTTP/deployment vars include `ALLOWED_ORIGINS`, `ALLOW_NULL_ORIGIN`, `RATE_LIMIT_WINDOW_MS`, `RATE_LIMIT_MAX`, `TRUST_PROXY`, `PORT`, and `NODE_ENV`. Adobe/plugin runtimes may send `Origin: null`; only enable that with `ALLOW_NULL_ORIGIN=true` when needed. Do not treat CORS as the licensing security boundary. Restrict browser origins in production and treat in-memory rate limiting as best-effort in serverless environments. Never put backend secrets in Photoshop plugin code; device IDs should be stable opaque hashes rather than sensitive raw personal data.

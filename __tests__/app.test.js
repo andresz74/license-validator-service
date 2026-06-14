@@ -11,6 +11,17 @@ const createTestApp = (options = {}) =>
     hmacSecret: TEST_HMAC_SECRET,
     ...options,
   });
+const adminAuth = (username = "admin", password = "secret") =>
+  `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`;
+const createAdminTestApp = (collection, options = {}) =>
+  createTestApp({
+    getLicensesCollection: () => collection,
+    getMongoConnected: () => true,
+    rateLimiter: noRateLimit,
+    adminUsername: "admin",
+    adminPassword: "secret",
+    ...options,
+  });
 const atomicValidationFilter = (licenseId) => ({
   licenseId,
   $or: [
@@ -47,6 +58,15 @@ const existingActivation = {
   pluginVersion: "1.0.0",
   activatedAt: "2026-06-14T00:00:00.000Z",
   lastSeenAt: "2026-06-14T00:00:00.000Z",
+};
+const createFindCursor = (licenses) => {
+  const cursor = {
+    sort: jest.fn().mockReturnThis(),
+    limit: jest.fn().mockReturnThis(),
+    toArray: jest.fn().mockResolvedValue(licenses),
+  };
+
+  return cursor;
 };
 
 describe("license validator service", () => {
@@ -207,6 +227,260 @@ describe("license validator service", () => {
         process.env.VERCEL = originalVercel;
       }
     }
+  });
+
+  test("admin license list requires basic auth", async () => {
+    const collection = {
+      find: jest.fn(),
+    };
+    const app = createAdminTestApp(collection);
+
+    const response = await request(app).get("/admin/licenses");
+
+    expect(response.status).toBe(401);
+    expect(response.headers["www-authenticate"]).toBe(
+      'Basic realm="License Admin"'
+    );
+    expect(collection.find).not.toHaveBeenCalled();
+  });
+
+  test("admin license list rejects wrong basic auth", async () => {
+    const app = createAdminTestApp({ find: jest.fn() });
+
+    const response = await request(app)
+      .get("/admin/licenses")
+      .set("Authorization", adminAuth("admin", "wrong"));
+
+    expect(response.status).toBe(401);
+  });
+
+  test("admin routes return 503 when credentials are not configured", async () => {
+    const app = createTestApp({
+      getMongoConnected: () => true,
+      rateLimiter: noRateLimit,
+    });
+
+    const response = await request(app)
+      .get("/admin/licenses")
+      .set("Authorization", adminAuth());
+
+    expect(response.status).toBe(503);
+    expect(response.text).toContain("Admin UI is not configured.");
+  });
+
+  test("admin license list renders licenses and used activation counts", async () => {
+    const cursor = createFindCursor([
+      {
+        licenseId: "PSP-ABCD-EFGH-JKLM",
+        status: "active",
+        maxActivations: 3,
+        activations: [existingActivation, { ...existingActivation, deviceId: "device-2" }],
+        source: "admin-ui",
+        createdAt: "2026-06-14T00:00:00.000Z",
+      },
+    ]);
+    const collection = {
+      find: jest.fn().mockReturnValue(cursor),
+    };
+    const app = createAdminTestApp(collection);
+
+    const response = await request(app)
+      .get("/admin/licenses")
+      .set("Authorization", adminAuth());
+
+    expect(response.status).toBe(200);
+    expect(response.text).toContain("PSP-ABCD-EFGH-JKLM");
+    expect(response.text).toContain("admin-ui");
+    expect(response.text).toContain("<td>2</td>");
+    expect(collection.find).toHaveBeenCalledWith({});
+    expect(cursor.sort).toHaveBeenCalledWith({ createdAt: -1 });
+    expect(cursor.limit).toHaveBeenCalledWith(100);
+  });
+
+  test("admin can create an activation-model license", async () => {
+    const collection = {
+      insertOne: jest.fn().mockResolvedValue({ acknowledged: true }),
+    };
+    const app = createAdminTestApp(collection);
+
+    const response = await request(app)
+      .post("/admin/licenses")
+      .set("Authorization", adminAuth())
+      .type("form")
+      .send({
+        prefix: "PSP",
+        maxActivations: "3",
+        source: "admin-ui",
+      });
+
+    expect(response.status).toBe(303);
+    expect(response.headers.location).toMatch(
+      /^\/admin\/licenses\/PSP-[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}\?created=1$/
+    );
+    expect(collection.insertOne).toHaveBeenCalledTimes(1);
+
+    const insertedLicense = collection.insertOne.mock.calls[0][0];
+    expect(insertedLicense).toEqual({
+      licenseId: expect.stringMatching(
+        /^PSP-[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$/
+      ),
+      status: "active",
+      maxActivations: 3,
+      activations: [],
+      createdAt: expect.any(String),
+      updatedAt: expect.any(String),
+      source: "admin-ui",
+    });
+    expect(insertedLicense).not.toHaveProperty("validationNumber");
+    expect(insertedLicense).not.toHaveProperty("validationStrings");
+    expect(insertedLicense).not.toHaveProperty("saltStrings");
+  });
+
+  test("admin license creation supports custom max activations and duplicate retry", async () => {
+    const duplicateError = new Error("duplicate");
+    duplicateError.code = 11000;
+    const collection = {
+      insertOne: jest
+        .fn()
+        .mockRejectedValueOnce(duplicateError)
+        .mockResolvedValueOnce({ acknowledged: true }),
+    };
+    const app = createAdminTestApp(collection);
+
+    const response = await request(app)
+      .post("/admin/licenses")
+      .set("Authorization", adminAuth())
+      .type("form")
+      .send({
+        prefix: "PSX",
+        maxActivations: "1",
+        source: "support",
+      });
+
+    expect(response.status).toBe(303);
+    expect(collection.insertOne).toHaveBeenCalledTimes(2);
+    expect(collection.insertOne.mock.calls[1][0]).toEqual(
+      expect.objectContaining({
+        licenseId: expect.stringMatching(
+          /^PSX-[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$/
+        ),
+        maxActivations: 1,
+        source: "support",
+      })
+    );
+  });
+
+  test("admin license detail shows activation records", async () => {
+    const collection = {
+      findOne: jest.fn().mockResolvedValue({
+        licenseId: "PSP-ABCD-EFGH-JKLM",
+        status: "active",
+        maxActivations: 3,
+        activations: [existingActivation],
+        source: "admin-ui",
+        createdAt: "2026-06-14T00:00:00.000Z",
+        updatedAt: "2026-06-14T00:00:00.000Z",
+      }),
+    };
+    const app = createAdminTestApp(collection);
+
+    const response = await request(app)
+      .get("/admin/licenses/PSP-ABCD-EFGH-JKLM")
+      .set("Authorization", adminAuth());
+
+    expect(response.status).toBe(200);
+    expect(response.text).toContain("PSP-ABCD-EFGH-JKLM");
+    expect(response.text).toContain("act_existing");
+    expect(response.text).toContain("device-1");
+    expect(response.text).toContain("This will remove all activation records");
+    expect(collection.findOne).toHaveBeenCalledWith({
+      licenseId: "PSP-ABCD-EFGH-JKLM",
+    });
+  });
+
+  test("admin unknown license detail returns 404", async () => {
+    const app = createAdminTestApp({
+      findOne: jest.fn().mockResolvedValue(null),
+    });
+
+    const response = await request(app)
+      .get("/admin/licenses/missing")
+      .set("Authorization", adminAuth());
+
+    expect(response.status).toBe(404);
+    expect(response.text).toContain("License not found.");
+  });
+
+  test.each(["active", "revoked", "disabled"])(
+    "admin can set license status to %s",
+    async (status) => {
+      const collection = {
+        updateOne: jest.fn().mockResolvedValue({ matchedCount: 1 }),
+      };
+      const app = createAdminTestApp(collection);
+
+      const response = await request(app)
+        .post("/admin/licenses/PSP-ABCD-EFGH-JKLM/status")
+        .set("Authorization", adminAuth())
+        .type("form")
+        .send({ status });
+
+      expect(response.status).toBe(303);
+      expect(response.headers.location).toBe(
+        "/admin/licenses/PSP-ABCD-EFGH-JKLM?statusUpdated=1"
+      );
+      expect(collection.updateOne).toHaveBeenCalledWith(
+        { licenseId: "PSP-ABCD-EFGH-JKLM" },
+        {
+          $set: {
+            status,
+            updatedAt: expect.any(String),
+          },
+        }
+      );
+    }
+  );
+
+  test("admin invalid status returns 400", async () => {
+    const collection = {
+      updateOne: jest.fn(),
+    };
+    const app = createAdminTestApp(collection);
+
+    const response = await request(app)
+      .post("/admin/licenses/PSP-ABCD-EFGH-JKLM/status")
+      .set("Authorization", adminAuth())
+      .type("form")
+      .send({ status: "pending" });
+
+    expect(response.status).toBe(400);
+    expect(response.text).toContain("Invalid license status.");
+    expect(collection.updateOne).not.toHaveBeenCalled();
+  });
+
+  test("admin can reset activations", async () => {
+    const collection = {
+      updateOne: jest.fn().mockResolvedValue({ matchedCount: 1 }),
+    };
+    const app = createAdminTestApp(collection);
+
+    const response = await request(app)
+      .post("/admin/licenses/PSP-ABCD-EFGH-JKLM/reset-activations")
+      .set("Authorization", adminAuth());
+
+    expect(response.status).toBe(303);
+    expect(response.headers.location).toBe(
+      "/admin/licenses/PSP-ABCD-EFGH-JKLM?activationsReset=1"
+    );
+    expect(collection.updateOne).toHaveBeenCalledWith(
+      { licenseId: "PSP-ABCD-EFGH-JKLM" },
+      {
+        $set: {
+          activations: [],
+          updatedAt: expect.any(String),
+        },
+      }
+    );
   });
 
   test.each([

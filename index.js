@@ -3,6 +3,7 @@ const cors = require("cors");
 const crypto = require("crypto");
 const { MongoClient } = require("mongodb");
 const rateLimit = require("express-rate-limit");
+const { insertLicenseWithRetry } = require("./scripts/createLicense");
 
 const port = process.env.PORT || 3000;
 
@@ -17,6 +18,9 @@ const DEFAULT_MAX_ACTIVATIONS = 3;
 const DEFAULT_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
 const DEFAULT_RATE_LIMIT_MAX = 100;
 const ACTIVE_LICENSE_STATUSES = ["active", "revoked", "disabled"];
+const ADMIN_LICENSE_STATUSES = ["active", "revoked", "disabled"];
+const DEFAULT_ADMIN_LICENSE_SOURCE = "admin-ui";
+const DEFAULT_ADMIN_LICENSE_PREFIX = "PSP";
 
 const parseAllowedOrigins = (value) => {
   if (!value) {
@@ -34,6 +38,13 @@ const getPositiveInteger = (value, fallback) => {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 };
 
+const parsePositiveInteger = (value) => {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isInteger(parsed) && parsed > 0 && String(parsed) === String(value)
+    ? parsed
+    : null;
+};
+
 const getBoolean = (value) => value === true || value === "true";
 
 const isVercelEnvironment = (value = process.env.VERCEL) =>
@@ -41,6 +52,58 @@ const isVercelEnvironment = (value = process.env.VERCEL) =>
 
 const shouldTrustProxy = () =>
   getBoolean(process.env.TRUST_PROXY) || isVercelEnvironment();
+
+const escapeHtml = (value) =>
+  String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+
+const renderAdminLayout = ({ title, body }) => `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>${escapeHtml(title)}</title>
+    <style>
+      body { color: #17202a; font-family: Arial, sans-serif; line-height: 1.5; margin: 32px; }
+      main { max-width: 1120px; }
+      table { border-collapse: collapse; margin: 16px 0; width: 100%; }
+      th, td { border: 1px solid #d8dee4; padding: 8px 10px; text-align: left; vertical-align: top; }
+      th { background: #f6f8fa; }
+      input, select, button { font: inherit; margin: 4px 0 12px; padding: 7px 9px; }
+      label { display: block; font-weight: 700; margin-top: 10px; }
+      .actions { display: flex; gap: 12px; margin: 16px 0; }
+      .danger { border: 1px solid #d1242f; padding: 12px; }
+      .muted { color: #57606a; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>${escapeHtml(title)}</h1>
+      <nav class="actions">
+        <a href="/admin/licenses">Licenses</a>
+        <a href="/admin/licenses/new">Create license</a>
+      </nav>
+      ${body}
+    </main>
+  </body>
+</html>`;
+
+const sendAdminHtml = (res, title, body, status = 200) => {
+  res.status(status).type("html").send(renderAdminLayout({ title, body }));
+};
+
+const renderAdminError = (res, status, message) => {
+  sendAdminHtml(
+    res,
+    "Admin Error",
+    `<p>${escapeHtml(message)}</p>`,
+    status
+  );
+};
 
 const createValidationRateLimiter = ({
   windowMs = getPositiveInteger(
@@ -341,6 +404,226 @@ const findActivationByDeviceId = (license, deviceId) =>
   getActivations(license).find(
     (activation) => activation.deviceId === deviceId
   );
+
+const getUsedActivations = (license) => getActivations(license).length;
+
+const getBasicAuthCredentials = (authorizationHeader) => {
+  if (!authorizationHeader || !authorizationHeader.startsWith("Basic ")) {
+    return null;
+  }
+
+  const encodedCredentials = authorizationHeader.slice("Basic ".length);
+
+  try {
+    const decodedCredentials = Buffer.from(
+      encodedCredentials,
+      "base64"
+    ).toString("utf8");
+    const separatorIndex = decodedCredentials.indexOf(":");
+
+    if (separatorIndex === -1) {
+      return null;
+    }
+
+    return {
+      username: decodedCredentials.slice(0, separatorIndex),
+      password: decodedCredentials.slice(separatorIndex + 1),
+    };
+  } catch (error) {
+    return null;
+  }
+};
+
+const valuesMatch = (actual, expected) => {
+  const actualBuffer = Buffer.from(String(actual));
+  const expectedBuffer = Buffer.from(String(expected));
+
+  if (actualBuffer.length !== expectedBuffer.length) {
+    return false;
+  }
+
+  return crypto.timingSafeEqual(actualBuffer, expectedBuffer);
+};
+
+const createAdminAuthMiddleware = ({ adminUsername, adminPassword }) =>
+  (req, res, next) => {
+    if (!adminUsername || !adminPassword) {
+      renderAdminError(res, 503, "Admin UI is not configured.");
+      return;
+    }
+
+    const credentials = getBasicAuthCredentials(req.get("authorization"));
+    const authenticated =
+      credentials &&
+      valuesMatch(credentials.username, adminUsername) &&
+      valuesMatch(credentials.password, adminPassword);
+
+    if (!authenticated) {
+      res.set("WWW-Authenticate", 'Basic realm="License Admin"');
+      res.status(401).send("Unauthorized");
+      return;
+    }
+
+    next();
+  };
+
+const asyncRoute = (handler) => async (req, res, next) => {
+  try {
+    await handler(req, res, next);
+  } catch (error) {
+    next(error);
+  }
+};
+
+const renderLicenseRows = (licenses) =>
+  licenses
+    .map(
+      (license) => `
+        <tr>
+          <td><code>${escapeHtml(license.licenseId)}</code></td>
+          <td>${escapeHtml(getLicenseStatus(license))}</td>
+          <td>${escapeHtml(getMaxActivations(license))}</td>
+          <td>${escapeHtml(getUsedActivations(license))}</td>
+          <td>${escapeHtml(license.source || "")}</td>
+          <td>${escapeHtml(license.createdAt || "")}</td>
+          <td><a href="/admin/licenses/${encodeURIComponent(license.licenseId)}">View</a></td>
+        </tr>`
+    )
+    .join("");
+
+const renderLicenseList = (licenses) => `
+  <p><a href="/admin/licenses/new">Create a new license</a></p>
+  <table>
+    <thead>
+      <tr>
+        <th>License ID</th>
+        <th>Status</th>
+        <th>Max activations</th>
+        <th>Used activations</th>
+        <th>Source</th>
+        <th>Created at</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${
+        licenses.length
+          ? renderLicenseRows(licenses)
+          : '<tr><td colspan="7">No licenses found.</td></tr>'
+      }
+    </tbody>
+  </table>`;
+
+const renderNewLicenseForm = () => `
+  <form method="post" action="/admin/licenses">
+    <label for="prefix">Prefix</label>
+    <input id="prefix" name="prefix" value="${DEFAULT_ADMIN_LICENSE_PREFIX}" required>
+
+    <label for="maxActivations">Max activations</label>
+    <input id="maxActivations" name="maxActivations" type="number" min="1" value="${DEFAULT_MAX_ACTIVATIONS}" required>
+
+    <label for="source">Source</label>
+    <input id="source" name="source" value="${DEFAULT_ADMIN_LICENSE_SOURCE}" required>
+
+    <button type="submit">Create license</button>
+  </form>`;
+
+const renderActivationRows = (activations) =>
+  activations
+    .map(
+      (activation) => `
+        <tr>
+          <td><code>${escapeHtml(activation.activationId)}</code></td>
+          <td><code>${escapeHtml(activation.deviceId)}</code></td>
+          <td>${escapeHtml(activation.pluginVersion || "")}</td>
+          <td>${escapeHtml(activation.activatedAt || "")}</td>
+          <td>${escapeHtml(activation.lastSeenAt || "")}</td>
+        </tr>`
+    )
+    .join("");
+
+const renderStatusOptions = (currentStatus) =>
+  ADMIN_LICENSE_STATUSES.map(
+    (status) =>
+      `<option value="${status}"${
+        status === currentStatus ? " selected" : ""
+      }>${status}</option>`
+  ).join("");
+
+const renderLicenseDetail = (license, notice = "") => {
+  const activations = getActivations(license);
+  const status = getLicenseStatus(license);
+
+  return `
+    ${notice ? `<p>${escapeHtml(notice)}</p>` : ""}
+    <dl>
+      <dt>License ID</dt>
+      <dd><code>${escapeHtml(license.licenseId)}</code></dd>
+      <dt>Status</dt>
+      <dd>${escapeHtml(status)}</dd>
+      <dt>Max activations</dt>
+      <dd>${escapeHtml(getMaxActivations(license))}</dd>
+      <dt>Used activations</dt>
+      <dd>${escapeHtml(activations.length)}</dd>
+      <dt>Source</dt>
+      <dd>${escapeHtml(license.source || "")}</dd>
+      <dt>Created at</dt>
+      <dd>${escapeHtml(license.createdAt || "")}</dd>
+      <dt>Updated at</dt>
+      <dd>${escapeHtml(license.updatedAt || "")}</dd>
+    </dl>
+
+    <h2>Activations</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Activation ID</th>
+          <th>Device ID</th>
+          <th>Plugin version</th>
+          <th>Activated at</th>
+          <th>Last seen at</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${
+          activations.length
+            ? renderActivationRows(activations)
+            : '<tr><td colspan="5">No activations yet.</td></tr>'
+        }
+      </tbody>
+    </table>
+
+    <h2>Change Status</h2>
+    <form method="post" action="/admin/licenses/${encodeURIComponent(license.licenseId)}/status">
+      <label for="status">Status</label>
+      <select id="status" name="status">
+        ${renderStatusOptions(status)}
+      </select>
+      <button type="submit">Update status</button>
+    </form>
+
+    <h2>Reset Activations</h2>
+    <form class="danger" method="post" action="/admin/licenses/${encodeURIComponent(license.licenseId)}/reset-activations">
+      <p>This will remove all activation records for this license.</p>
+      <button type="submit">Reset activations</button>
+    </form>`;
+};
+
+const getAdminNotice = (query) => {
+  if (query.created) {
+    return "License created.";
+  }
+
+  if (query.statusUpdated) {
+    return "License status updated.";
+  }
+
+  if (query.activationsReset) {
+    return "Activation records reset.";
+  }
+
+  return "";
+};
 
 const validateLicenseKey = async ({ key, collection, hmacSecret }) => {
   const { value: licenseToValidate, error: keyError } = getValidLicenseKey(key);
@@ -715,6 +998,8 @@ const createApp = ({
   allowedOrigins = parseAllowedOrigins(process.env.ALLOWED_ORIGINS),
   allowNullOrigin = getBoolean(process.env.ALLOW_NULL_ORIGIN),
   trustProxy = shouldTrustProxy(),
+  adminUsername = process.env.ADMIN_USERNAME,
+  adminPassword = process.env.ADMIN_PASSWORD,
 } = {}) => {
   const app = express();
 
@@ -726,6 +1011,7 @@ const createApp = ({
 
   // Enable JSON support
   app.use(express.json());
+  app.use(express.urlencoded({ extended: false }));
 
   app.get("/health", (req, res) => {
     const connected = getMongoConnected();
@@ -785,6 +1071,201 @@ const createApp = ({
         code: "INTERNAL_SERVER_ERROR",
       });
     }
+  });
+
+  const getAdminLicensesCollection = async () => {
+    const collection = await getLicensesCollection();
+
+    if (!collection) {
+      return null;
+    }
+
+    return collection;
+  };
+
+  app.use(
+    "/admin",
+    createAdminAuthMiddleware({ adminUsername, adminPassword })
+  );
+
+  app.get("/admin", (req, res) => {
+    res.redirect(303, "/admin/licenses");
+  });
+
+  app.get(
+    "/admin/licenses",
+    asyncRoute(async (req, res) => {
+      const collection = await getAdminLicensesCollection();
+
+      if (!collection) {
+        renderAdminError(res, 503, "Database not ready.");
+        return;
+      }
+
+      const licenses = await collection
+        .find({})
+        .sort({ createdAt: -1 })
+        .limit(100)
+        .toArray();
+
+      sendAdminHtml(res, "Licenses", renderLicenseList(licenses));
+    })
+  );
+
+  app.get("/admin/licenses/new", (req, res) => {
+    sendAdminHtml(res, "Create License", renderNewLicenseForm());
+  });
+
+  app.post(
+    "/admin/licenses",
+    asyncRoute(async (req, res) => {
+      const collection = await getAdminLicensesCollection();
+
+      if (!collection) {
+        renderAdminError(res, 503, "Database not ready.");
+        return;
+      }
+
+      const prefix = String(
+        req.body.prefix || DEFAULT_ADMIN_LICENSE_PREFIX
+      ).toUpperCase();
+      const maxActivations = parsePositiveInteger(
+        req.body.maxActivations || String(DEFAULT_MAX_ACTIVATIONS)
+      );
+      const source = String(
+        req.body.source || DEFAULT_ADMIN_LICENSE_SOURCE
+      ).trim();
+
+      if (!/^[A-Z]{2,10}$/.test(prefix)) {
+        renderAdminError(res, 400, "Prefix must contain 2 to 10 letters.");
+        return;
+      }
+
+      if (!maxActivations) {
+        renderAdminError(res, 400, "Max activations must be a positive integer.");
+        return;
+      }
+
+      if (!source) {
+        renderAdminError(res, 400, "Source is required.");
+        return;
+      }
+
+      const license = await insertLicenseWithRetry({
+        collection,
+        prefix,
+        maxActivations,
+        source,
+      });
+
+      res.redirect(
+        303,
+        `/admin/licenses/${encodeURIComponent(license.licenseId)}?created=1`
+      );
+    })
+  );
+
+  app.get(
+    "/admin/licenses/:licenseId",
+    asyncRoute(async (req, res) => {
+      const collection = await getAdminLicensesCollection();
+
+      if (!collection) {
+        renderAdminError(res, 503, "Database not ready.");
+        return;
+      }
+
+      const license = await collection.findOne({
+        licenseId: req.params.licenseId,
+      });
+
+      if (!license) {
+        renderAdminError(res, 404, "License not found.");
+        return;
+      }
+
+      sendAdminHtml(
+        res,
+        `License ${license.licenseId}`,
+        renderLicenseDetail(license, getAdminNotice(req.query))
+      );
+    })
+  );
+
+  app.post(
+    "/admin/licenses/:licenseId/status",
+    asyncRoute(async (req, res) => {
+      const status = req.body.status;
+
+      if (!ADMIN_LICENSE_STATUSES.includes(status)) {
+        renderAdminError(res, 400, "Invalid license status.");
+        return;
+      }
+
+      const collection = await getAdminLicensesCollection();
+
+      if (!collection) {
+        renderAdminError(res, 503, "Database not ready.");
+        return;
+      }
+
+      const updateResult = await collection.updateOne(
+        { licenseId: req.params.licenseId },
+        {
+          $set: {
+            status,
+            updatedAt: new Date().toISOString(),
+          },
+        }
+      );
+
+      if (!updateResult.matchedCount) {
+        renderAdminError(res, 404, "License not found.");
+        return;
+      }
+
+      res.redirect(
+        303,
+        `/admin/licenses/${encodeURIComponent(req.params.licenseId)}?statusUpdated=1`
+      );
+    })
+  );
+
+  app.post(
+    "/admin/licenses/:licenseId/reset-activations",
+    asyncRoute(async (req, res) => {
+      const collection = await getAdminLicensesCollection();
+
+      if (!collection) {
+        renderAdminError(res, 503, "Database not ready.");
+        return;
+      }
+
+      const updateResult = await collection.updateOne(
+        { licenseId: req.params.licenseId },
+        {
+          $set: {
+            activations: [],
+            updatedAt: new Date().toISOString(),
+          },
+        }
+      );
+
+      if (!updateResult.matchedCount) {
+        renderAdminError(res, 404, "License not found.");
+        return;
+      }
+
+      res.redirect(
+        303,
+        `/admin/licenses/${encodeURIComponent(req.params.licenseId)}?activationsReset=1`
+      );
+    })
+  );
+
+  app.use("/admin", (error, req, res, next) => {
+    console.error("Failed to render admin UI:", error);
+    renderAdminError(res, 500, "Admin request failed.");
   });
 
   return app;

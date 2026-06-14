@@ -84,6 +84,8 @@ Deprecated but temporarily supported for backward compatibility. GET responses i
 | --- | --- | --- | --- | --- |
 | `MONGODB_URI` | Yes for startup/deploy | None | `mongodb+srv://user:pass@cluster.example.net` | MongoDB connection. |
 | `HMAC_SECRET` | Yes for startup/deploy | None | `replace-with-a-long-random-secret` | Server-side HMAC key for validation strings. |
+| `ADMIN_USERNAME` | Yes for admin UI | None | `admin` | HTTP Basic Auth username for `/admin` routes. |
+| `ADMIN_PASSWORD` | Yes for admin UI | None | `use-a-long-random-password` | HTTP Basic Auth password for `/admin` routes. |
 | `PORT` | No | `3000` | `3000` | Local server port for `npm start`. |
 | `ALLOWED_ORIGINS` | No | No browser CORS origins | `https://example.com,https://app.example.com` | Comma-separated browser origins allowed by CORS. |
 | `ALLOW_NULL_ORIGIN` | No | `false` | `true` | Allows `Origin: null` for Adobe/plugin/package/file-like runtimes. |
@@ -150,6 +152,8 @@ For legacy records, `validationNumber`, `validationStrings`, and `saltStrings` m
 npm install
 export MONGODB_URI="mongodb+srv://user:pass@cluster.example.net"
 export HMAC_SECRET="replace-with-a-long-random-secret"
+export ADMIN_USERNAME="admin"
+export ADMIN_PASSWORD="use-a-long-random-password"
 npm start
 ```
 
@@ -160,6 +164,24 @@ npm test
 ```
 
 There are no lint or typecheck scripts configured.
+
+## Admin UI
+
+The private admin UI is available under `/admin` and redirects to `/admin/licenses`. It is protected with HTTP Basic Auth using `ADMIN_USERNAME` and `ADMIN_PASSWORD`; if those variables are missing, admin routes are not accessible. Do not put admin credentials in the Photoshop plugin.
+
+Admin routes:
+
+```txt
+GET  /admin
+GET  /admin/licenses
+GET  /admin/licenses/new
+POST /admin/licenses
+GET  /admin/licenses/:licenseId
+POST /admin/licenses/:licenseId/status
+POST /admin/licenses/:licenseId/reset-activations
+```
+
+Use `/admin/licenses` to create licenses before customers activate them, view activation records, set status to `active`, `revoked`, or `disabled`, and reset activations for support cases. Generated license IDs are what you send to customers. Do not expose license creation as a public unauthenticated API.
 
 ## Admin: Create a License
 
@@ -196,7 +218,7 @@ Give the generated `licenseId` to the customer. The customer activates it later 
 
 ## Deployment Notes
 
-The app supports local long-running server mode with `npm start` and Vercel/serverless import through `index.js`. Do not call `app.listen()` in serverless mode; the exported Express app is used by the platform.
+The app supports local long-running server mode with `npm start` and Vercel/serverless import through `index.js`. Do not call `app.listen()` in serverless mode; the exported Express app is used by the platform. If the admin UI is enabled on Vercel, configure `ADMIN_USERNAME` and `ADMIN_PASSWORD` there as environment variables.
 
 CORS is handled by the Express app. Set `ALLOWED_ORIGINS` for normal browser/web origins instead of using wildcard static headers. Requests without an `Origin` header still work for server-to-server clients, `curl`, health checks, and plugin runtimes that omit the header.
 
