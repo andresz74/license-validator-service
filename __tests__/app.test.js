@@ -233,6 +233,9 @@ describe("license validator service", () => {
     expect(response.body.message).toBe("OK");
     expect(response.body.validationString).toBeTruthy();
     expect(response.headers.deprecation).toBe("true");
+    expect(response.headers.warning).toBe(
+      '299 - "GET /validate-license is deprecated; use POST /validate-license"'
+    );
     expect(collection.findOneAndUpdate).toHaveBeenCalledWith(
       atomicValidationFilter("abc123"),
       {
@@ -295,6 +298,32 @@ describe("license validator service", () => {
       { returnDocument: "after" }
     );
     expect(collection.findOne).toHaveBeenCalledWith({ licenseId: "abc123" });
+  });
+
+  test("POST returns structured error when HMAC secret is not configured", async () => {
+    const collection = {
+      findOne: jest.fn(),
+      findOneAndUpdate: jest.fn(),
+    };
+
+    const app = createApp({
+      getLicensesCollection: () => collection,
+      getMongoConnected: () => true,
+      hmacSecret: "",
+      rateLimiter: noRateLimit,
+    });
+
+    const response = await request(app)
+      .post("/validate-license")
+      .send({ key: "abc123" });
+
+    expect(response.status).toBe(500);
+    expect(response.body).toEqual({
+      message: "Internal Server Error",
+      code: "SERVER_CONFIGURATION_ERROR",
+    });
+    expect(collection.findOne).not.toHaveBeenCalled();
+    expect(collection.findOneAndUpdate).not.toHaveBeenCalled();
   });
 
   test.each([
