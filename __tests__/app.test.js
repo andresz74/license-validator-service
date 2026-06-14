@@ -22,6 +22,32 @@ const invalidDocumentBody = {
   message: "License validation failed",
   code: "LICENSE_DOCUMENT_INVALID",
 };
+const activeLicenseFilter = (licenseId) => ({
+  licenseId,
+  $or: [{ status: "active" }, { status: { $exists: false } }],
+});
+const existingActivationFilter = (licenseId, deviceId) => ({
+  ...activeLicenseFilter(licenseId),
+  activations: { $elemMatch: { deviceId } },
+});
+const newActivationFilter = (licenseId, deviceId) => ({
+  ...activeLicenseFilter(licenseId),
+  $nor: [{ activations: { $elemMatch: { deviceId } } }],
+  $expr: {
+    $lt: [
+      { $size: { $ifNull: ["$activations", []] } },
+      { $ifNull: ["$maxActivations", 3] },
+    ],
+  },
+});
+const existingActivation = {
+  activationId: "act_existing",
+  deviceId: "device-1",
+  activationToken: "existing-token",
+  pluginVersion: "1.0.0",
+  activatedAt: "2026-06-14T00:00:00.000Z",
+  lastSeenAt: "2026-06-14T00:00:00.000Z",
+};
 
 describe("license validator service", () => {
   test("exports an Express app for serverless usage while keeping createApp importable", () => {
@@ -137,6 +163,439 @@ describe("license validator service", () => {
         process.env.VERCEL = originalVercel;
       }
     }
+  });
+
+  test.each([
+    [
+      "missing key",
+      { deviceId: "device-1" },
+      {
+        message: "License key is required",
+        code: "MISSING_LICENSE_KEY",
+      },
+    ],
+    [
+      "empty key",
+      { key: "", deviceId: "device-1" },
+      {
+        message: "License key is required",
+        code: "MISSING_LICENSE_KEY",
+      },
+    ],
+    [
+      "whitespace key",
+      { key: "   ", deviceId: "device-1" },
+      {
+        message: "License key is required",
+        code: "MISSING_LICENSE_KEY",
+      },
+    ],
+    [
+      "non-string key",
+      { key: 123, deviceId: "device-1" },
+      {
+        message: "Invalid license key",
+        code: "INVALID_LICENSE_KEY",
+      },
+    ],
+    [
+      "missing deviceId",
+      { key: "abc123" },
+      {
+        message: "Device ID is required",
+        code: "MISSING_DEVICE_ID",
+      },
+    ],
+    [
+      "empty deviceId",
+      { key: "abc123", deviceId: "" },
+      {
+        message: "Device ID is required",
+        code: "MISSING_DEVICE_ID",
+      },
+    ],
+    [
+      "whitespace deviceId",
+      { key: "abc123", deviceId: "   " },
+      {
+        message: "Device ID is required",
+        code: "MISSING_DEVICE_ID",
+      },
+    ],
+    [
+      "non-string deviceId",
+      { key: "abc123", deviceId: 123 },
+      {
+        message: "Invalid device ID",
+        code: "INVALID_DEVICE_ID",
+      },
+    ],
+    [
+      "non-string pluginVersion",
+      { key: "abc123", deviceId: "device-1", pluginVersion: 123 },
+      {
+        message: "Invalid plugin version",
+        code: "INVALID_PLUGIN_VERSION",
+      },
+    ],
+  ])("POST /activate-license returns 400 for %s", async (_, body, expected) => {
+    const collection = {
+      findOne: jest.fn(),
+      findOneAndUpdate: jest.fn(),
+    };
+
+    const app = createTestApp({
+      getLicensesCollection: () => collection,
+      getMongoConnected: () => true,
+      rateLimiter: noRateLimit,
+    });
+
+    const response = await request(app).post("/activate-license").send(body);
+
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual(expected);
+    expect(collection.findOne).not.toHaveBeenCalled();
+    expect(collection.findOneAndUpdate).not.toHaveBeenCalled();
+  });
+
+  test("POST /activate-license creates a new activation atomically", async () => {
+    const license = {
+      licenseId: "abc123",
+      status: "active",
+      maxActivations: 3,
+      activations: [],
+    };
+
+    const collection = {
+      findOne: jest.fn().mockResolvedValue(license),
+      findOneAndUpdate: jest
+        .fn()
+        .mockResolvedValueOnce(null)
+        .mockImplementationOnce((filter, update) =>
+          Promise.resolve({
+            ...license,
+            activations: [update.$push.activations],
+          })
+        ),
+    };
+
+    const app = createTestApp({
+      getLicensesCollection: () => collection,
+      getMongoConnected: () => true,
+      rateLimiter: noRateLimit,
+    });
+
+    const response = await request(app)
+      .post("/activate-license")
+      .send({
+        key: "abc123",
+        deviceId: "device-1",
+        pluginVersion: "1.0.0",
+      });
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({
+      message: "OK",
+      activationId: expect.stringMatching(/^act_[a-f0-9]{24}$/),
+      activationToken: expect.stringMatching(/^[a-f0-9]{64}$/),
+      activated: true,
+    });
+    expect(collection.findOne).toHaveBeenCalledWith({ licenseId: "abc123" });
+    expect(collection.findOneAndUpdate).toHaveBeenNthCalledWith(
+      1,
+      existingActivationFilter("abc123", "device-1"),
+      {
+        $set: {
+          "activations.$.lastSeenAt": expect.any(String),
+          "activations.$.pluginVersion": "1.0.0",
+        },
+      },
+      { returnDocument: "after" }
+    );
+    expect(collection.findOneAndUpdate).toHaveBeenNthCalledWith(
+      2,
+      newActivationFilter("abc123", "device-1"),
+      {
+        $push: {
+          activations: {
+            activationId: response.body.activationId,
+            deviceId: "device-1",
+            activationToken: response.body.activationToken,
+            pluginVersion: "1.0.0",
+            activatedAt: expect.any(String),
+            lastSeenAt: expect.any(String),
+          },
+        },
+      },
+      { returnDocument: "after" }
+    );
+  });
+
+  test("POST /activate-license supports legacy license defaults", async () => {
+    const legacyLicense = { licenseId: "legacy-key" };
+    const collection = {
+      findOne: jest.fn().mockResolvedValue(legacyLicense),
+      findOneAndUpdate: jest
+        .fn()
+        .mockResolvedValueOnce(null)
+        .mockImplementationOnce((filter, update) =>
+          Promise.resolve({
+            ...legacyLicense,
+            activations: [update.$push.activations],
+          })
+        ),
+    };
+
+    const app = createTestApp({
+      getLicensesCollection: () => collection,
+      getMongoConnected: () => true,
+      rateLimiter: noRateLimit,
+    });
+
+    const response = await request(app)
+      .post("/activate-license")
+      .send({ key: "legacy-key", deviceId: "device-1" });
+
+    expect(response.status).toBe(200);
+    expect(response.body.activated).toBe(true);
+    expect(collection.findOneAndUpdate).toHaveBeenNthCalledWith(
+      2,
+      newActivationFilter("legacy-key", "device-1"),
+      expect.objectContaining({
+        $push: {
+          activations: expect.objectContaining({
+            deviceId: "device-1",
+          }),
+        },
+      }),
+      { returnDocument: "after" }
+    );
+  });
+
+  test("POST /activate-license reuses an existing device activation", async () => {
+    const license = {
+      licenseId: "abc123",
+      status: "active",
+      maxActivations: 1,
+      activations: [existingActivation],
+    };
+    const updatedLicense = {
+      ...license,
+      activations: [
+        {
+          ...existingActivation,
+          pluginVersion: "1.1.0",
+          lastSeenAt: "2026-06-14T01:00:00.000Z",
+        },
+      ],
+    };
+    const collection = {
+      findOne: jest.fn().mockResolvedValue(license),
+      findOneAndUpdate: jest.fn().mockResolvedValueOnce(updatedLicense),
+    };
+
+    const app = createTestApp({
+      getLicensesCollection: () => collection,
+      getMongoConnected: () => true,
+      rateLimiter: noRateLimit,
+    });
+
+    const response = await request(app)
+      .post("/activate-license")
+      .send({
+        key: "abc123",
+        deviceId: "device-1",
+        pluginVersion: "1.1.0",
+      });
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({
+      message: "OK",
+      activationId: "act_existing",
+      activationToken: "existing-token",
+      activated: true,
+      reused: true,
+    });
+    expect(collection.findOneAndUpdate).toHaveBeenCalledTimes(1);
+    expect(collection.findOneAndUpdate).toHaveBeenCalledWith(
+      existingActivationFilter("abc123", "device-1"),
+      {
+        $set: {
+          "activations.$.lastSeenAt": expect.any(String),
+          "activations.$.pluginVersion": "1.1.0",
+        },
+      },
+      { returnDocument: "after" }
+    );
+  });
+
+  test("POST /activate-license returns 429 when activation slots are full", async () => {
+    const license = {
+      licenseId: "abc123",
+      status: "active",
+      maxActivations: 1,
+      activations: [existingActivation],
+    };
+    const collection = {
+      findOne: jest
+        .fn()
+        .mockResolvedValueOnce(license)
+        .mockResolvedValueOnce(license),
+      findOneAndUpdate: jest.fn().mockResolvedValue(null),
+    };
+
+    const app = createTestApp({
+      getLicensesCollection: () => collection,
+      getMongoConnected: () => true,
+      rateLimiter: noRateLimit,
+    });
+
+    const response = await request(app)
+      .post("/activate-license")
+      .send({ key: "abc123", deviceId: "device-2" });
+
+    expect(response.status).toBe(429);
+    expect(response.body).toEqual({
+      message: "No more activations",
+      code: "ACTIVATION_LIMIT_REACHED",
+    });
+    expect(collection.findOneAndUpdate).toHaveBeenNthCalledWith(
+      2,
+      newActivationFilter("abc123", "device-2"),
+      expect.objectContaining({ $push: { activations: expect.any(Object) } }),
+      { returnDocument: "after" }
+    );
+  });
+
+  test.each(["revoked", "disabled"])(
+    "POST /activate-license rejects %s licenses",
+    async (status) => {
+      const collection = {
+        findOne: jest.fn().mockResolvedValue({
+          licenseId: "abc123",
+          status,
+          activations: [],
+        }),
+        findOneAndUpdate: jest.fn(),
+      };
+
+      const app = createTestApp({
+        getLicensesCollection: () => collection,
+        getMongoConnected: () => true,
+        rateLimiter: noRateLimit,
+      });
+
+      const response = await request(app)
+        .post("/activate-license")
+        .send({ key: "abc123", deviceId: "device-1" });
+
+      expect(response.status).toBe(403);
+      expect(response.body).toEqual({
+        message: "License is not active",
+        code: "LICENSE_NOT_ACTIVE",
+      });
+      expect(collection.findOneAndUpdate).not.toHaveBeenCalled();
+    }
+  );
+
+  test.each([
+    ["invalid status", { status: "pending", activations: [] }],
+    ["non-number maxActivations", { maxActivations: "three", activations: [] }],
+    ["negative maxActivations", { maxActivations: -1, activations: [] }],
+    ["non-array activations", { activations: "not-an-array" }],
+    [
+      "malformed activation entry",
+      {
+        activations: [
+          {
+            activationId: "act_bad",
+            deviceId: "",
+            activationToken: "token",
+          },
+        ],
+      },
+    ],
+  ])("POST /activate-license returns controlled error for %s", async (_, fields) => {
+    const collection = {
+      findOne: jest.fn().mockResolvedValue({
+        licenseId: "bad-key",
+        ...fields,
+      }),
+      findOneAndUpdate: jest.fn(),
+    };
+
+    const app = createTestApp({
+      getLicensesCollection: () => collection,
+      getMongoConnected: () => true,
+      rateLimiter: noRateLimit,
+    });
+
+    const response = await request(app)
+      .post("/activate-license")
+      .send({ key: "bad-key", deviceId: "device-1" });
+
+    expect(response.status).toBe(500);
+    expect(response.body).toEqual(invalidDocumentBody);
+    expect(collection.findOneAndUpdate).not.toHaveBeenCalled();
+  });
+
+  test("POST /activate-license returns 403 for unknown licenses", async () => {
+    const collection = {
+      findOne: jest.fn().mockResolvedValue(null),
+      findOneAndUpdate: jest.fn(),
+    };
+
+    const app = createTestApp({
+      getLicensesCollection: () => collection,
+      getMongoConnected: () => true,
+      rateLimiter: noRateLimit,
+    });
+
+    const response = await request(app)
+      .post("/activate-license")
+      .send({ key: "missing", deviceId: "device-1" });
+
+    expect(response.status).toBe(403);
+    expect(response.body).toEqual({
+      message: "Invalid license key",
+      code: "LICENSE_NOT_FOUND",
+    });
+    expect(collection.findOneAndUpdate).not.toHaveBeenCalled();
+  });
+
+  test("POST /activate-license returns 503 when database is not ready", async () => {
+    const app = createTestApp({
+      getLicensesCollection: () => null,
+      getMongoConnected: () => false,
+      rateLimiter: noRateLimit,
+    });
+
+    const response = await request(app)
+      .post("/activate-license")
+      .send({ key: "abc123", deviceId: "device-1" });
+
+    expect(response.status).toBe(503);
+    expect(response.body).toEqual({
+      message: "Database not ready",
+      code: "DATABASE_NOT_READY",
+    });
+  });
+
+  test("POST /activate-license is rate limited with configurable limits", async () => {
+    const app = createTestApp({
+      getMongoConnected: () => true,
+      rateLimitOptions: { windowMs: 60 * 1000, limit: 1 },
+    });
+
+    const firstResponse = await request(app)
+      .post("/activate-license")
+      .send({});
+    const secondResponse = await request(app)
+      .post("/activate-license")
+      .send({});
+
+    expect(firstResponse.status).toBe(400);
+    expect(secondResponse.status).toBe(429);
   });
 
   test("returns structured error when license key is missing", async () => {

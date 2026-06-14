@@ -1,15 +1,24 @@
 [
   {
     "licenseId": "sample-license-key-001",
-    "validationNumber": 0,
-    "validationStrings": [],
-    "saltStrings": []
+    "status": "active",
+    "maxActivations": 3,
+    "activations": []
   },
   {
     "licenseId": "sample-license-key-002",
-    "validationNumber": 0,
-    "validationStrings": [],
-    "saltStrings": []
+    "status": "active",
+    "maxActivations": 1,
+    "activations": [
+      {
+        "activationId": "act_sample001",
+        "deviceId": "sample-device-hash",
+        "activationToken": "sample-token",
+        "pluginVersion": "1.0.0",
+        "activatedAt": "2026-06-14T00:00:00.000Z",
+        "lastSeenAt": "2026-06-14T00:00:00.000Z"
+      }
+    ]
   },
   {
     "licenseId": "sample-license-key-003",

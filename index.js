@@ -12,8 +12,11 @@ let mongoConnected = false;
 const maxConnectAttempts = 5;
 const connectRetryDelayMs = 1000;
 const DEFAULT_VALIDATION_LIMIT = 3;
+const DEFAULT_LICENSE_STATUS = "active";
+const DEFAULT_MAX_ACTIVATIONS = 3;
 const DEFAULT_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
 const DEFAULT_RATE_LIMIT_MAX = 100;
+const ACTIVE_LICENSE_STATUSES = ["active", "revoked", "disabled"];
 
 const parseAllowedOrigins = (value) => {
   if (!value) {
@@ -98,6 +101,55 @@ const getValidLicenseKey = (key) => {
   return { value: trimmedKey };
 };
 
+const getValidDeviceId = (deviceId) => {
+  if (deviceId === undefined) {
+    return {
+      error: {
+        message: "Device ID is required",
+        code: "MISSING_DEVICE_ID",
+      },
+    };
+  }
+
+  if (typeof deviceId !== "string") {
+    return {
+      error: {
+        message: "Invalid device ID",
+        code: "INVALID_DEVICE_ID",
+      },
+    };
+  }
+
+  const trimmedDeviceId = deviceId.trim();
+  if (!trimmedDeviceId) {
+    return {
+      error: {
+        message: "Device ID is required",
+        code: "MISSING_DEVICE_ID",
+      },
+    };
+  }
+
+  return { value: trimmedDeviceId };
+};
+
+const getValidPluginVersion = (pluginVersion) => {
+  if (pluginVersion === undefined) {
+    return {};
+  }
+
+  if (typeof pluginVersion !== "string") {
+    return {
+      error: {
+        message: "Invalid plugin version",
+        code: "INVALID_PLUGIN_VERSION",
+      },
+    };
+  }
+
+  return { value: pluginVersion.trim() || "unknown" };
+};
+
 const getFindOneAndUpdateDocument = (result) => {
   if (!result) {
     return null;
@@ -126,6 +178,45 @@ const isValidValidationNumber = (value) =>
 const isValidStringArray = (value) =>
   Array.isArray(value) && value.every((item) => typeof item === "string");
 
+const isNonEmptyString = (value) => typeof value === "string" && value.trim();
+
+const isValidActivation = (activation) => {
+  if (!activation || typeof activation !== "object" || Array.isArray(activation)) {
+    return false;
+  }
+
+  if (
+    !isNonEmptyString(activation.activationId) ||
+    !isNonEmptyString(activation.deviceId) ||
+    !isNonEmptyString(activation.activationToken)
+  ) {
+    return false;
+  }
+
+  if (
+    !isMissingValue(activation.pluginVersion) &&
+    typeof activation.pluginVersion !== "string"
+  ) {
+    return false;
+  }
+
+  if (
+    !isMissingValue(activation.activatedAt) &&
+    typeof activation.activatedAt !== "string"
+  ) {
+    return false;
+  }
+
+  if (
+    !isMissingValue(activation.lastSeenAt) &&
+    typeof activation.lastSeenAt !== "string"
+  ) {
+    return false;
+  }
+
+  return true;
+};
+
 const getLicenseShapeError = (license) => {
   if (!isMissingValue(license.validationNumber)) {
     if (!isValidValidationNumber(license.validationNumber)) {
@@ -148,13 +239,102 @@ const getLicenseShapeError = (license) => {
   return null;
 };
 
+const getActivationLicenseShapeError = (license) => {
+  if (!isMissingValue(license.status)) {
+    if (!ACTIVE_LICENSE_STATUSES.includes(license.status)) {
+      return "status";
+    }
+  }
+
+  if (!isMissingValue(license.maxActivations)) {
+    if (!Number.isInteger(license.maxActivations) || license.maxActivations < 0) {
+      return "maxActivations";
+    }
+  }
+
+  if (!isMissingValue(license.activations)) {
+    if (!Array.isArray(license.activations)) {
+      return "activations";
+    }
+
+    if (!license.activations.every(isValidActivation)) {
+      return "activations";
+    }
+  }
+
+  return null;
+};
+
+const getLicenseStatus = (license) =>
+  isMissingValue(license.status) ? DEFAULT_LICENSE_STATUS : license.status;
+
+const getMaxActivations = (license) =>
+  isMissingValue(license.maxActivations)
+    ? DEFAULT_MAX_ACTIVATIONS
+    : license.maxActivations;
+
+const getActivations = (license) =>
+  isMissingValue(license.activations) ? [] : license.activations;
+
 const generateSalt = () => crypto.randomBytes(16).toString("hex");
+
+const generateActivationId = () =>
+  `act_${crypto.randomBytes(12).toString("hex")}`;
 
 const generateValidationString = (licenseKey, salt, hmacSecret) =>
   crypto
     .createHmac("sha256", hmacSecret)
     .update(`${licenseKey}:${salt}`)
     .digest("hex");
+
+const generateActivationToken = ({
+  licenseKey,
+  deviceId,
+  activationId,
+  salt,
+  hmacSecret,
+}) =>
+  crypto
+    .createHmac("sha256", hmacSecret)
+    .update(`${licenseKey}:${deviceId}:${activationId}:${salt}`)
+    .digest("hex");
+
+const getActiveLicenseFilter = (licenseId) => ({
+  licenseId,
+  $or: [
+    { status: DEFAULT_LICENSE_STATUS },
+    { status: { $exists: false } },
+  ],
+});
+
+const getExistingActivationFilter = (licenseId, deviceId) => ({
+  ...getActiveLicenseFilter(licenseId),
+  activations: { $elemMatch: { deviceId } },
+});
+
+const getNewActivationFilter = (licenseId, deviceId) => ({
+  ...getActiveLicenseFilter(licenseId),
+  $nor: [{ activations: { $elemMatch: { deviceId } } }],
+  $expr: {
+    $lt: [
+      { $size: { $ifNull: ["$activations", []] } },
+      { $ifNull: ["$maxActivations", DEFAULT_MAX_ACTIVATIONS] },
+    ],
+  },
+});
+
+const getActivationResponseBody = (activation, reused = false) => ({
+  message: "OK",
+  activationId: activation.activationId,
+  activationToken: activation.activationToken,
+  activated: true,
+  ...(reused ? { reused: true } : {}),
+});
+
+const findActivationByDeviceId = (license, deviceId) =>
+  getActivations(license).find(
+    (activation) => activation.deviceId === deviceId
+  );
 
 const validateLicenseKey = async ({ key, collection, hmacSecret }) => {
   const { value: licenseToValidate, error: keyError } = getValidLicenseKey(key);
@@ -285,6 +465,213 @@ const validateLicenseKey = async ({ key, collection, hmacSecret }) => {
   };
 };
 
+const activateLicense = async ({
+  key,
+  deviceId,
+  pluginVersion,
+  collection,
+  hmacSecret,
+}) => {
+  const { value: licenseToActivate, error: keyError } = getValidLicenseKey(key);
+
+  if (keyError) {
+    return { status: 400, body: keyError };
+  }
+
+  const { value: validDeviceId, error: deviceIdError } =
+    getValidDeviceId(deviceId);
+
+  if (deviceIdError) {
+    return { status: 400, body: deviceIdError };
+  }
+
+  const { value: validPluginVersion, error: pluginVersionError } =
+    getValidPluginVersion(pluginVersion);
+
+  if (pluginVersionError) {
+    return { status: 400, body: pluginVersionError };
+  }
+
+  if (!collection) {
+    return {
+      status: 503,
+      body: {
+        message: "Database not ready",
+        code: "DATABASE_NOT_READY",
+      },
+    };
+  }
+
+  if (!hmacSecret) {
+    return {
+      status: 500,
+      body: {
+        message: "Internal Server Error",
+        code: "SERVER_CONFIGURATION_ERROR",
+      },
+    };
+  }
+
+  const existingLicense = await collection.findOne({
+    licenseId: licenseToActivate,
+  });
+
+  if (!existingLicense) {
+    return {
+      status: 403,
+      body: {
+        message: "Invalid license key",
+        code: "LICENSE_NOT_FOUND",
+      },
+    };
+  }
+
+  if (getActivationLicenseShapeError(existingLicense)) {
+    return licenseDocumentInvalid();
+  }
+
+  if (getLicenseStatus(existingLicense) !== DEFAULT_LICENSE_STATUS) {
+    return {
+      status: 403,
+      body: {
+        message: "License is not active",
+        code: "LICENSE_NOT_ACTIVE",
+      },
+    };
+  }
+
+  const now = new Date().toISOString();
+  const existingActivationUpdate = {
+    $set: {
+      "activations.$.lastSeenAt": now,
+      ...(validPluginVersion !== undefined
+        ? { "activations.$.pluginVersion": validPluginVersion }
+        : {}),
+    },
+  };
+
+  const existingActivationResult = await collection.findOneAndUpdate(
+    getExistingActivationFilter(licenseToActivate, validDeviceId),
+    existingActivationUpdate,
+    { returnDocument: "after" }
+  );
+  const existingActivationLicense = getFindOneAndUpdateDocument(
+    existingActivationResult
+  );
+
+  if (existingActivationLicense) {
+    const activation = findActivationByDeviceId(
+      existingActivationLicense,
+      validDeviceId
+    );
+
+    if (!activation || getActivationLicenseShapeError(existingActivationLicense)) {
+      return licenseDocumentInvalid();
+    }
+
+    return {
+      status: 200,
+      body: getActivationResponseBody(activation, true),
+    };
+  }
+
+  const activationId = generateActivationId();
+  const activationSalt = generateSalt();
+  const activationToken = generateActivationToken({
+    licenseKey: licenseToActivate,
+    deviceId: validDeviceId,
+    activationId,
+    salt: activationSalt,
+    hmacSecret,
+  });
+  const activation = {
+    activationId,
+    deviceId: validDeviceId,
+    activationToken,
+    ...(validPluginVersion !== undefined
+      ? { pluginVersion: validPluginVersion }
+      : {}),
+    activatedAt: now,
+    lastSeenAt: now,
+  };
+
+  const newActivationResult = await collection.findOneAndUpdate(
+    getNewActivationFilter(licenseToActivate, validDeviceId),
+    {
+      $push: {
+        activations: activation,
+      },
+    },
+    { returnDocument: "after" }
+  );
+  const newActivationLicense = getFindOneAndUpdateDocument(newActivationResult);
+
+  if (newActivationLicense) {
+    return {
+      status: 200,
+      body: getActivationResponseBody(activation),
+    };
+  }
+
+  const fallbackLicense = await collection.findOne({
+    licenseId: licenseToActivate,
+  });
+
+  if (!fallbackLicense) {
+    return {
+      status: 403,
+      body: {
+        message: "Invalid license key",
+        code: "LICENSE_NOT_FOUND",
+      },
+    };
+  }
+
+  if (getActivationLicenseShapeError(fallbackLicense)) {
+    return licenseDocumentInvalid();
+  }
+
+  if (getLicenseStatus(fallbackLicense) !== DEFAULT_LICENSE_STATUS) {
+    return {
+      status: 403,
+      body: {
+        message: "License is not active",
+        code: "LICENSE_NOT_ACTIVE",
+      },
+    };
+  }
+
+  const fallbackActivation = findActivationByDeviceId(
+    fallbackLicense,
+    validDeviceId
+  );
+
+  if (fallbackActivation) {
+    return {
+      status: 200,
+      body: getActivationResponseBody(fallbackActivation, true),
+    };
+  }
+
+  if (getActivations(fallbackLicense).length >= getMaxActivations(fallbackLicense)) {
+    return {
+      status: 429,
+      body: {
+        message: "No more activations",
+        code: "ACTIVATION_LIMIT_REACHED",
+      },
+    };
+  }
+
+  return {
+    status: 500,
+    body: {
+      message: "Internal Server Error",
+      code: "ACTIVATION_UPDATE_FAILED",
+    },
+  };
+};
+
 const createMongoCollectionProvider = (url) => {
   let clientPromise;
   let collection;
@@ -339,10 +726,10 @@ const createApp = ({
     res.status(statusCode).json({ status: "ok", mongoConnected: connected });
   });
 
-  app.use(
-    "/validate-license",
-    rateLimiter || createValidationRateLimiter(rateLimitOptions)
-  );
+  const validationRateLimiter =
+    rateLimiter || createValidationRateLimiter(rateLimitOptions);
+
+  app.use(["/validate-license", "/activate-license"], validationRateLimiter);
 
   const handleValidateLicense = async (key, res) => {
     try {
@@ -372,6 +759,25 @@ const createApp = ({
 
   app.post("/validate-license", async (req, res) => {
     await handleValidateLicense(req.body && req.body.key, res);
+  });
+
+  app.post("/activate-license", async (req, res) => {
+    try {
+      const result = await activateLicense({
+        key: req.body && req.body.key,
+        deviceId: req.body && req.body.deviceId,
+        pluginVersion: req.body && req.body.pluginVersion,
+        collection: await getLicensesCollection(),
+        hmacSecret,
+      });
+      res.status(result.status).json(result.body);
+    } catch (error) {
+      console.error("Failed to activate license using MongoDB:", error);
+      res.status(500).json({
+        message: "Internal Server Error",
+        code: "INTERNAL_SERVER_ERROR",
+      });
+    }
   });
 
   return app;
