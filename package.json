@@ -4,6 +4,7 @@
   "description": "Express API for validating MongoDB-backed software license keys.",
   "main": "index.js",
   "scripts": {
+    "create-license": "node scripts/createLicense.js",
     "start": "node index.js",
     "test": "jest"
   },

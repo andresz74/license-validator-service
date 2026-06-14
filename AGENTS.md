@@ -9,6 +9,7 @@ This is a small Node.js/Express license activation and validation API. The main 
 - `npm install`: install dependencies from `package-lock.json`.
 - `npm start`: run `node index.js` locally on `PORT` or `3000`.
 - `npm test`: run the Jest/Supertest suite.
+- `npm run create-license`: create an activation-model license document in MongoDB for seller/admin use.
 
 Local startup requires `MONGODB_URI` and `HMAC_SECRET`:
 
@@ -25,6 +26,8 @@ Use `POST /activate-license` with JSON body `{ "key": "...", "deviceId": "...", 
 License validation must stay atomic: enforce the validation limit in MongoDB with `findOneAndUpdate`, `$inc`, and `$push`. Do not reintroduce read-then-write validation count logic. Legacy license documents may omit `validationNumber`, `validationStrings`, or `saltStrings`; existing values for those fields must have the expected number/array types and malformed documents should fail with a controlled server error.
 
 Activation logic must also stay atomic. Same-device reactivation must reuse the existing activation and must not consume another slot. New-device activation must only append an activation record when the license is active and the current activation count is below `maxActivations`. Legacy activation records may omit `status`, `maxActivations`, or `activations`; existing values must have the documented types and malformed documents should fail safely.
+
+Generate new customer licenses locally with `npm run create-license`; the script loads `.env` from the project root if present. New license records should use the activation model (`status`, `maxActivations`, `activations`, timestamps, `source`) and should not include legacy `validationNumber`, `validationStrings`, or `saltStrings` fields. Do not add public license creation endpoints without authentication and explicit approval.
 
 ## Coding Style & Naming Conventions
 
