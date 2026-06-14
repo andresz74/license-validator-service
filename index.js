@@ -104,6 +104,44 @@ const getFindOneAndUpdateDocument = (result) => {
   return result;
 };
 
+const licenseDocumentInvalid = () => ({
+  status: 500,
+  body: {
+    message: "License validation failed",
+    code: "LICENSE_DOCUMENT_INVALID",
+  },
+});
+
+const isMissingValue = (value) => value === undefined;
+
+const isValidValidationNumber = (value) =>
+  Number.isInteger(value) && value >= 0;
+
+const isValidStringArray = (value) =>
+  Array.isArray(value) && value.every((item) => typeof item === "string");
+
+const getLicenseShapeError = (license) => {
+  if (!isMissingValue(license.validationNumber)) {
+    if (!isValidValidationNumber(license.validationNumber)) {
+      return "validationNumber";
+    }
+  }
+
+  if (!isMissingValue(license.validationStrings)) {
+    if (!isValidStringArray(license.validationStrings)) {
+      return "validationStrings";
+    }
+  }
+
+  if (!isMissingValue(license.saltStrings)) {
+    if (!isValidStringArray(license.saltStrings)) {
+      return "saltStrings";
+    }
+  }
+
+  return null;
+};
+
 const generateSalt = () => crypto.randomBytes(16).toString("hex");
 
 const generateValidationString = (licenseKey, salt, hmacSecret) =>
@@ -139,6 +177,34 @@ const validateLicenseKey = async ({ key, collection, hmacSecret }) => {
     };
   }
 
+  const existingLicense = await collection.findOne({
+    licenseId: licenseToValidate,
+  });
+
+  if (!existingLicense) {
+    return {
+      status: 403,
+      body: {
+        message: "Invalid license key",
+        code: "LICENSE_NOT_FOUND",
+      },
+    };
+  }
+
+  if (getLicenseShapeError(existingLicense)) {
+    return licenseDocumentInvalid();
+  }
+
+  if (existingLicense.validationNumber >= DEFAULT_VALIDATION_LIMIT) {
+    return {
+      status: 429,
+      body: {
+        message: "Validation limit reached",
+        code: "VALIDATION_LIMIT_REACHED",
+      },
+    };
+  }
+
   const salt = generateSalt();
   const validationString = generateValidationString(
     licenseToValidate,
@@ -149,7 +215,10 @@ const validateLicenseKey = async ({ key, collection, hmacSecret }) => {
   const updateResult = await collection.findOneAndUpdate(
     {
       licenseId: licenseToValidate,
-      validationNumber: { $lt: DEFAULT_VALIDATION_LIMIT },
+      $or: [
+        { validationNumber: { $lt: DEFAULT_VALIDATION_LIMIT } },
+        { validationNumber: { $exists: false } },
+      ],
     },
     {
       $inc: { validationNumber: 1 },
@@ -164,11 +233,11 @@ const validateLicenseKey = async ({ key, collection, hmacSecret }) => {
   const updatedLicense = getFindOneAndUpdateDocument(updateResult);
 
   if (!updatedLicense) {
-    const existingLicense = await collection.findOne({
+    const fallbackLicense = await collection.findOne({
       licenseId: licenseToValidate,
     });
 
-    if (!existingLicense) {
+    if (!fallbackLicense) {
       return {
         status: 403,
         body: {
@@ -178,7 +247,11 @@ const validateLicenseKey = async ({ key, collection, hmacSecret }) => {
       };
     }
 
-    if (existingLicense.validationNumber >= DEFAULT_VALIDATION_LIMIT) {
+    if (getLicenseShapeError(fallbackLicense)) {
+      return licenseDocumentInvalid();
+    }
+
+    if (fallbackLicense.validationNumber >= DEFAULT_VALIDATION_LIMIT) {
       return {
         status: 429,
         body: {

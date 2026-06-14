@@ -11,6 +11,17 @@ const createTestApp = (options = {}) =>
     hmacSecret: TEST_HMAC_SECRET,
     ...options,
   });
+const atomicValidationFilter = (licenseId) => ({
+  licenseId,
+  $or: [
+    { validationNumber: { $lt: 3 } },
+    { validationNumber: { $exists: false } },
+  ],
+});
+const invalidDocumentBody = {
+  message: "License validation failed",
+  code: "LICENSE_DOCUMENT_INVALID",
+};
 
 describe("license validator service", () => {
   test("exports an Express app for serverless usage while keeping createApp importable", () => {
@@ -204,7 +215,7 @@ describe("license validator service", () => {
     };
 
     const collection = {
-      findOne: jest.fn(),
+      findOne: jest.fn().mockResolvedValue(license),
       findOneAndUpdate: jest.fn().mockResolvedValue(license),
     };
 
@@ -223,10 +234,7 @@ describe("license validator service", () => {
     expect(response.body.validationString).toBeTruthy();
     expect(response.headers.deprecation).toBe("true");
     expect(collection.findOneAndUpdate).toHaveBeenCalledWith(
-      {
-        licenseId: "abc123",
-        validationNumber: { $lt: 3 },
-      },
+      atomicValidationFilter("abc123"),
       {
         $inc: { validationNumber: 1 },
         $push: {
@@ -245,7 +253,7 @@ describe("license validator service", () => {
       .digest("hex");
     expect(response.body.validationString).toBe(expectedValidationString);
     expect(response.body.validationString).toMatch(/^[a-f0-9]{64}$/);
-    expect(collection.findOne).not.toHaveBeenCalled();
+    expect(collection.findOne).toHaveBeenCalledWith({ licenseId: "abc123" });
   });
 
   test("POST validates a license with the shared atomic update flow", async () => {
@@ -257,7 +265,7 @@ describe("license validator service", () => {
     };
 
     const collection = {
-      findOne: jest.fn(),
+      findOne: jest.fn().mockResolvedValue(license),
       findOneAndUpdate: jest.fn().mockResolvedValue(license),
     };
 
@@ -276,10 +284,7 @@ describe("license validator service", () => {
     expect(response.body.validationString).toMatch(/^[a-f0-9]{64}$/);
     expect(response.headers.deprecation).toBeUndefined();
     expect(collection.findOneAndUpdate).toHaveBeenCalledWith(
-      {
-        licenseId: "abc123",
-        validationNumber: { $lt: 3 },
-      },
+      atomicValidationFilter("abc123"),
       expect.objectContaining({
         $inc: { validationNumber: 1 },
         $push: {
@@ -289,7 +294,77 @@ describe("license validator service", () => {
       }),
       { returnDocument: "after" }
     );
-    expect(collection.findOne).not.toHaveBeenCalled();
+    expect(collection.findOne).toHaveBeenCalledWith({ licenseId: "abc123" });
+  });
+
+  test.each([
+    ["validationNumber", { licenseId: "legacy-key", validationStrings: [], saltStrings: [] }],
+    ["validationStrings", { licenseId: "legacy-key", validationNumber: 0, saltStrings: [] }],
+    ["saltStrings", { licenseId: "legacy-key", validationNumber: 0, validationStrings: [] }],
+  ])(
+    "POST validates legacy license missing %s",
+    async (_, legacyLicense) => {
+      const collection = {
+        findOne: jest.fn().mockResolvedValue(legacyLicense),
+        findOneAndUpdate: jest.fn().mockResolvedValue({
+          ...legacyLicense,
+          validationNumber: 1,
+        }),
+      };
+
+      const app = createTestApp({
+        getLicensesCollection: () => collection,
+        getMongoConnected: () => true,
+        rateLimiter: noRateLimit,
+      });
+
+      const response = await request(app)
+        .post("/validate-license")
+        .send({ key: "legacy-key" });
+
+      expect(response.status).toBe(200);
+      expect(response.body.message).toBe("OK");
+      expect(collection.findOneAndUpdate).toHaveBeenCalledWith(
+        atomicValidationFilter("legacy-key"),
+        expect.objectContaining({
+          $inc: { validationNumber: 1 },
+          $push: {
+            validationStrings: response.body.validationString,
+            saltStrings: expect.any(String),
+          },
+        }),
+        { returnDocument: "after" }
+      );
+    }
+  );
+
+  test.each([
+    ["non-number validationNumber", { validationNumber: "two", validationStrings: [], saltStrings: [] }],
+    ["negative validationNumber", { validationNumber: -1, validationStrings: [], saltStrings: [] }],
+    ["non-array validationStrings", { validationNumber: 0, validationStrings: "not-an-array", saltStrings: [] }],
+    ["non-array saltStrings", { validationNumber: 0, validationStrings: [], saltStrings: null }],
+  ])("POST returns controlled error for %s", async (_, fields) => {
+    const collection = {
+      findOne: jest.fn().mockResolvedValue({
+        licenseId: "bad-key",
+        ...fields,
+      }),
+      findOneAndUpdate: jest.fn(),
+    };
+
+    const app = createTestApp({
+      getLicensesCollection: () => collection,
+      getMongoConnected: () => true,
+      rateLimiter: noRateLimit,
+    });
+
+    const response = await request(app)
+      .post("/validate-license")
+      .send({ key: "bad-key" });
+
+    expect(response.status).toBe(500);
+    expect(response.body).toEqual(invalidDocumentBody);
+    expect(collection.findOneAndUpdate).not.toHaveBeenCalled();
   });
 
   test("POST /validate-license is rate limited with configurable limits", async () => {
@@ -301,7 +376,7 @@ describe("license validator service", () => {
     };
 
     const collection = {
-      findOne: jest.fn(),
+      findOne: jest.fn().mockResolvedValue(license),
       findOneAndUpdate: jest.fn().mockResolvedValue(license),
     };
 
@@ -332,7 +407,7 @@ describe("license validator service", () => {
     };
 
     const collection = {
-      findOne: jest.fn(),
+      findOne: jest.fn().mockResolvedValue(license),
       findOneAndUpdate: jest.fn().mockResolvedValue(license),
     };
 
@@ -412,8 +487,8 @@ describe("license validator service", () => {
 
   test("POST returns structured error for missing license", async () => {
     const collection = {
-      findOneAndUpdate: jest.fn().mockResolvedValue(null),
       findOne: jest.fn().mockResolvedValue(null),
+      findOneAndUpdate: jest.fn(),
     };
 
     const app = createTestApp({
@@ -431,6 +506,7 @@ describe("license validator service", () => {
       message: "Invalid license key",
       code: "LICENSE_NOT_FOUND",
     });
+    expect(collection.findOneAndUpdate).not.toHaveBeenCalled();
   });
 
   test("POST returns structured error when validation limit reached", async () => {
@@ -442,8 +518,8 @@ describe("license validator service", () => {
     };
 
     const collection = {
-      findOneAndUpdate: jest.fn().mockResolvedValue(null),
       findOne: jest.fn().mockResolvedValue(license),
+      findOneAndUpdate: jest.fn(),
     };
 
     const app = createTestApp({
@@ -461,6 +537,7 @@ describe("license validator service", () => {
       message: "Validation limit reached",
       code: "VALIDATION_LIMIT_REACHED",
     });
+    expect(collection.findOneAndUpdate).not.toHaveBeenCalled();
   });
 
   test("POST returns structured error when database not ready", async () => {
@@ -483,8 +560,8 @@ describe("license validator service", () => {
 
   test("returns structured error for missing license", async () => {
     const collection = {
-      findOneAndUpdate: jest.fn().mockResolvedValue(null),
       findOne: jest.fn().mockResolvedValue(null),
+      findOneAndUpdate: jest.fn(),
     };
 
     const app = createTestApp({
@@ -502,18 +579,8 @@ describe("license validator service", () => {
       message: "Invalid license key",
       code: "LICENSE_NOT_FOUND",
     });
-    expect(collection.findOneAndUpdate).toHaveBeenCalledWith(
-      {
-        licenseId: "missing",
-        validationNumber: { $lt: 3 },
-      },
-      expect.objectContaining({
-        $inc: { validationNumber: 1 },
-        $push: expect.any(Object),
-      }),
-      { returnDocument: "after" }
-    );
     expect(collection.findOne).toHaveBeenCalledWith({ licenseId: "missing" });
+    expect(collection.findOneAndUpdate).not.toHaveBeenCalled();
   });
 
   test("returns structured error when validation limit reached", async () => {
@@ -525,8 +592,8 @@ describe("license validator service", () => {
     };
 
     const collection = {
-      findOneAndUpdate: jest.fn().mockResolvedValue(null),
       findOne: jest.fn().mockResolvedValue(license),
+      findOneAndUpdate: jest.fn(),
     };
 
     const app = createTestApp({
@@ -544,6 +611,7 @@ describe("license validator service", () => {
       message: "Validation limit reached",
       code: "VALIDATION_LIMIT_REACHED",
     });
+    expect(collection.findOneAndUpdate).not.toHaveBeenCalled();
   });
 
   test("returns safe error when atomic update does not apply below the limit", async () => {
@@ -576,6 +644,39 @@ describe("license validator service", () => {
     });
   });
 
+  test("returns controlled error when fallback lookup finds malformed document", async () => {
+    const collection = {
+      findOne: jest
+        .fn()
+        .mockResolvedValueOnce({
+          licenseId: "abc123",
+          validationNumber: 1,
+          validationStrings: [],
+          saltStrings: [],
+        })
+        .mockResolvedValueOnce({
+          licenseId: "abc123",
+          validationNumber: "two",
+          validationStrings: [],
+          saltStrings: [],
+        }),
+      findOneAndUpdate: jest.fn().mockResolvedValue(null),
+    };
+
+    const app = createTestApp({
+      getLicensesCollection: () => collection,
+      getMongoConnected: () => true,
+      rateLimiter: noRateLimit,
+    });
+
+    const response = await request(app)
+      .get("/validate-license")
+      .query({ key: "abc123" });
+
+    expect(response.status).toBe(500);
+    expect(response.body).toEqual(invalidDocumentBody);
+  });
+
   test("returns structured error when MongoDB update throws", async () => {
     const consoleErrorSpy = jest
       .spyOn(console, "error")
@@ -583,7 +684,12 @@ describe("license validator service", () => {
 
     const collection = {
       findOneAndUpdate: jest.fn().mockRejectedValue(new Error("write failed")),
-      findOne: jest.fn(),
+      findOne: jest.fn().mockResolvedValue({
+        licenseId: "abc123",
+        validationNumber: 1,
+        validationStrings: [],
+        saltStrings: [],
+      }),
     };
 
     const app = createTestApp({
@@ -601,7 +707,7 @@ describe("license validator service", () => {
       message: "Internal Server Error",
       code: "INTERNAL_SERVER_ERROR",
     });
-    expect(collection.findOne).not.toHaveBeenCalled();
+    expect(collection.findOne).toHaveBeenCalledWith({ licenseId: "abc123" });
 
     consoleErrorSpy.mockRestore();
   });

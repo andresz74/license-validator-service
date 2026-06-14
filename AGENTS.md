@@ -22,7 +22,7 @@ npm start
 
 Use `POST /validate-license` with JSON body `{ "key": "..." }` for new clients. `GET /validate-license?key=...` is deprecated but kept for backward compatibility. `GET /health` reports MongoDB readiness.
 
-License validation must stay atomic: enforce the validation limit in MongoDB with `findOneAndUpdate`, `$inc`, and `$push`. Do not reintroduce read-then-write validation count logic.
+License validation must stay atomic: enforce the validation limit in MongoDB with `findOneAndUpdate`, `$inc`, and `$push`. Do not reintroduce read-then-write validation count logic. Legacy license documents may omit `validationNumber`, `validationStrings`, or `saltStrings`; existing values for those fields must have the expected number/array types and malformed documents should fail with a controlled server error.
 
 ## Coding Style & Naming Conventions
 
