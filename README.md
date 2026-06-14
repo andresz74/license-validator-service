@@ -86,6 +86,7 @@ Deprecated but temporarily supported for backward compatibility. GET responses i
 | `HMAC_SECRET` | Yes for startup/deploy | None | `replace-with-a-long-random-secret` | Server-side HMAC key for validation strings. |
 | `PORT` | No | `3000` | `3000` | Local server port for `npm start`. |
 | `ALLOWED_ORIGINS` | No | No browser CORS origins | `https://example.com,https://app.example.com` | Comma-separated browser origins allowed by CORS. |
+| `ALLOW_NULL_ORIGIN` | No | `false` | `true` | Allows `Origin: null` for Adobe/plugin/package/file-like runtimes. |
 | `RATE_LIMIT_WINDOW_MS` | No | `900000` | `900000` | Validation rate-limit window. |
 | `RATE_LIMIT_MAX` | No | `100` | `100` | Validation requests allowed per window per IP. |
 | `TRUST_PROXY` | No | auto-enabled on Vercel; otherwise unset/false | `true` | Enables `app.set("trust proxy", 1)` behind trusted proxies. |
@@ -164,7 +165,21 @@ There are no lint or typecheck scripts configured.
 
 The app supports local long-running server mode with `npm start` and Vercel/serverless import through `index.js`. Do not call `app.listen()` in serverless mode; the exported Express app is used by the platform.
 
-CORS is handled by the Express app. Set `ALLOWED_ORIGINS` in production instead of using wildcard static headers. Requests without an `Origin` header still work for server-to-server clients and `curl`.
+CORS is handled by the Express app. Set `ALLOWED_ORIGINS` for normal browser/web origins instead of using wildcard static headers. Requests without an `Origin` header still work for server-to-server clients, `curl`, health checks, and plugin runtimes that omit the header.
+
+Adobe/plugin/package/file-like runtimes may send `Origin: null`. Allow that only when needed:
+
+```bash
+ALLOWED_ORIGINS=
+ALLOW_NULL_ORIGIN=true
+```
+
+For a plugin plus web-based local or production testing:
+
+```bash
+ALLOWED_ORIGINS="https://yourdomain.com,http://localhost:3000,http://127.0.0.1:5500"
+ALLOW_NULL_ORIGIN=true
+```
 
 Rate limiting applies to `POST /activate-license`, `POST /validate-license`, and deprecated `GET /validate-license`; `/health` is not rate-limited. The default in-memory limiter is best-effort in serverless environments because each instance has separate memory. Trusted proxy handling is enabled automatically on Vercel. Use `TRUST_PROXY=true` on other trusted hosted/proxy platforms so client IP handling works correctly.
 
@@ -177,6 +192,7 @@ Rate limiting applies to `POST /activate-license`, `POST /validate-license`, and
 - Treat activation tokens as activation receipts; add server-side check/revocation endpoints later if the plugin needs ongoing license enforcement.
 - Do not commit production MongoDB credentials, HMAC secrets, or production license data.
 - Restrict `ALLOWED_ORIGINS` to trusted browser clients in production.
+- CORS is not authentication. License activation rules, rate limiting, and server-side `HMAC_SECRET` handling are the security boundary.
 - Treat in-memory rate limiting as best-effort in serverless deployments.
 
 ## Sample Data

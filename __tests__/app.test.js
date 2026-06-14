@@ -125,6 +125,50 @@ describe("license validator service", () => {
     expect(response.headers["access-control-allow-origin"]).toBeUndefined();
   });
 
+  test("does not allow null Origin unless explicitly enabled", async () => {
+    const app = createTestApp({
+      allowedOrigins: ["https://app.example.com"],
+      allowNullOrigin: false,
+      getMongoConnected: () => true,
+      rateLimiter: noRateLimit,
+    });
+
+    const response = await request(app).get("/health").set("Origin", "null");
+
+    expect(response.status).toBe(200);
+    expect(response.headers["access-control-allow-origin"]).toBeUndefined();
+  });
+
+  test("allows null Origin when explicitly enabled", async () => {
+    const app = createTestApp({
+      allowNullOrigin: true,
+      getMongoConnected: () => true,
+      rateLimiter: noRateLimit,
+    });
+
+    const response = await request(app).get("/health").set("Origin", "null");
+
+    expect(response.status).toBe(200);
+    expect(response.headers["access-control-allow-origin"]).toBe("null");
+  });
+
+  test("allows null Origin activation preflight when explicitly enabled", async () => {
+    const app = createTestApp({
+      allowNullOrigin: true,
+      getMongoConnected: () => true,
+      rateLimiter: noRateLimit,
+    });
+
+    const response = await request(app)
+      .options("/activate-license")
+      .set("Origin", "null")
+      .set("Access-Control-Request-Method", "POST")
+      .set("Access-Control-Request-Headers", "content-type");
+
+    expect(response.status).toBe(204);
+    expect(response.headers["access-control-allow-origin"]).toBe("null");
+  });
+
   test("trust proxy can be enabled through app config", () => {
     const app = createTestApp({
       trustProxy: true,

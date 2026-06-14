@@ -56,12 +56,18 @@ const createValidationRateLimiter = ({
     legacyHeaders: false,
   });
 
-const createCorsOptions = (
-  allowedOrigins = parseAllowedOrigins(process.env.ALLOWED_ORIGINS)
-) => ({
+const createCorsOptions = ({
+  allowedOrigins = parseAllowedOrigins(process.env.ALLOWED_ORIGINS),
+  allowNullOrigin = getBoolean(process.env.ALLOW_NULL_ORIGIN),
+} = {}) => ({
   origin: (origin, callback) => {
     if (!origin) {
       callback(null, false);
+      return;
+    }
+
+    if (origin === "null") {
+      callback(null, allowNullOrigin ? origin : false);
       return;
     }
 
@@ -707,6 +713,7 @@ const createApp = ({
   rateLimitOptions,
   hmacSecret = process.env.HMAC_SECRET,
   allowedOrigins = parseAllowedOrigins(process.env.ALLOWED_ORIGINS),
+  allowNullOrigin = getBoolean(process.env.ALLOW_NULL_ORIGIN),
   trustProxy = shouldTrustProxy(),
 } = {}) => {
   const app = express();
@@ -715,7 +722,7 @@ const createApp = ({
     app.set("trust proxy", 1);
   }
 
-  app.use(cors(createCorsOptions(allowedOrigins)));
+  app.use(cors(createCorsOptions({ allowedOrigins, allowNullOrigin })));
 
   // Enable JSON support
   app.use(express.json());
