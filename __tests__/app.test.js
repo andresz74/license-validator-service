@@ -108,6 +108,37 @@ describe("license validator service", () => {
     expect(app.get("trust proxy")).toBe(1);
   });
 
+  test("trust proxy is enabled automatically on Vercel", async () => {
+    const originalVercel = process.env.VERCEL;
+    process.env.VERCEL = "1";
+
+    try {
+      const app = createTestApp({
+        getMongoConnected: () => true,
+        rateLimitOptions: { windowMs: 60 * 1000, limit: 10 },
+      });
+
+      expect(app.get("trust proxy")).toBe(1);
+
+      const response = await request(app)
+        .post("/validate-license")
+        .set("X-Forwarded-For", "203.0.113.10")
+        .send({});
+
+      expect(response.status).toBe(400);
+      expect(response.body).toEqual({
+        message: "License key is required",
+        code: "MISSING_LICENSE_KEY",
+      });
+    } finally {
+      if (originalVercel === undefined) {
+        delete process.env.VERCEL;
+      } else {
+        process.env.VERCEL = originalVercel;
+      }
+    }
+  });
+
   test("returns structured error when license key is missing", async () => {
     const collection = {
       findOne: jest.fn(),

@@ -33,6 +33,12 @@ const getPositiveInteger = (value, fallback) => {
 
 const getBoolean = (value) => value === true || value === "true";
 
+const isVercelEnvironment = (value = process.env.VERCEL) =>
+  value === "1" || getBoolean(value);
+
+const shouldTrustProxy = () =>
+  getBoolean(process.env.TRUST_PROXY) || isVercelEnvironment();
+
 const createValidationRateLimiter = ({
   windowMs = getPositiveInteger(
     process.env.RATE_LIMIT_WINDOW_MS,
@@ -314,7 +320,7 @@ const createApp = ({
   rateLimitOptions,
   hmacSecret = process.env.HMAC_SECRET,
   allowedOrigins = parseAllowedOrigins(process.env.ALLOWED_ORIGINS),
-  trustProxy = getBoolean(process.env.TRUST_PROXY),
+  trustProxy = shouldTrustProxy(),
 } = {}) => {
   const app = express();
 

@@ -62,7 +62,8 @@ Deprecated but temporarily supported for backward compatibility. GET responses i
 | `ALLOWED_ORIGINS` | No | No browser CORS origins | `https://example.com,https://app.example.com` | Comma-separated browser origins allowed by CORS. |
 | `RATE_LIMIT_WINDOW_MS` | No | `900000` | `900000` | Validation rate-limit window. |
 | `RATE_LIMIT_MAX` | No | `100` | `100` | Validation requests allowed per window per IP. |
-| `TRUST_PROXY` | No | unset/false | `true` | Enables `app.set("trust proxy", 1)` behind trusted proxies. |
+| `TRUST_PROXY` | No | auto-enabled on Vercel; otherwise unset/false | `true` | Enables `app.set("trust proxy", 1)` behind trusted proxies. |
+| `VERCEL` | Set by Vercel | unset | `1` | Platform marker used to enable trusted proxy handling on Vercel. |
 | `NODE_ENV` | No | unset | `production` | Standard Node environment label; current CORS behavior is controlled by `ALLOWED_ORIGINS`. |
 
 ## MongoDB Setup
@@ -111,7 +112,7 @@ The app supports local long-running server mode with `npm start` and Vercel/serv
 
 CORS is handled by the Express app. Set `ALLOWED_ORIGINS` in production instead of using wildcard static headers. Requests without an `Origin` header still work for server-to-server clients and `curl`.
 
-Rate limiting applies to `POST /validate-license` and deprecated `GET /validate-license`; `/health` is not rate-limited. The default in-memory limiter is best-effort in serverless environments because each instance has separate memory. Use `TRUST_PROXY=true` on trusted hosted/proxy platforms so client IP handling works correctly.
+Rate limiting applies to `POST /validate-license` and deprecated `GET /validate-license`; `/health` is not rate-limited. The default in-memory limiter is best-effort in serverless environments because each instance has separate memory. Trusted proxy handling is enabled automatically on Vercel. Use `TRUST_PROXY=true` on other trusted hosted/proxy platforms so client IP handling works correctly.
 
 ## Security Notes
 
