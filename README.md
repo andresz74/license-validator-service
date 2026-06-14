@@ -85,7 +85,7 @@ Expected document shape:
 }
 ```
 
-License validation increments `validationNumber` atomically with MongoDB and stores generated validation strings and salts in the arrays.
+For legacy records, `validationNumber`, `validationStrings`, and `saltStrings` may be omitted; validation treats an omitted `validationNumber` as `0` and creates omitted arrays when the license is validated. If those fields exist, they must have the expected types: `validationNumber` must be a non-negative integer, and `validationStrings` and `saltStrings` must be arrays of strings. License validation increments `validationNumber` atomically with MongoDB and stores generated validation strings and salts in the arrays.
 
 ## Local Development
 
