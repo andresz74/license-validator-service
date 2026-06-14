@@ -161,6 +161,39 @@ npm test
 
 There are no lint or typecheck scripts configured.
 
+## Admin: Create a License
+
+Use the local admin script to create license records before customers activate them. This script is for the seller/admin only; it is not used by the Photoshop plugin and should not be exposed as a public unauthenticated API.
+
+```bash
+export MONGODB_URI="mongodb+srv://user:pass@cluster.example.net"
+npm run create-license
+```
+
+The script also loads `.env` from the project root when present. Exported shell variables take precedence over `.env` values.
+
+Optional arguments:
+
+```bash
+npm run create-license -- --max-activations 3 --source manual --prefix PSP
+```
+
+The script generates a readable license key such as `PSP-K7M9-Q2XA-84PD` and inserts an activation-model document:
+
+```js
+{
+  licenseId: "PSP-K7M9-Q2XA-84PD",
+  status: "active",
+  maxActivations: 3,
+  activations: [],
+  createdAt: "2026-06-14T00:00:00.000Z",
+  updatedAt: "2026-06-14T00:00:00.000Z",
+  source: "script"
+}
+```
+
+Give the generated `licenseId` to the customer. The customer activates it later through the plugin UI. The script uses `MONGODB_DATABASE` and `LICENSE_COLLECTION` when set; otherwise it uses `licenseDatabase.licenses`. It does not require `HMAC_SECRET`.
+
 ## Deployment Notes
 
 The app supports local long-running server mode with `npm start` and Vercel/serverless import through `index.js`. Do not call `app.listen()` in serverless mode; the exported Express app is used by the platform.
